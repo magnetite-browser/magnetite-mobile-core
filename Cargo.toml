@@ -1,0 +1,41 @@
+[package]
+name = "magnetite-mobile-core"
+version = "0.1.0"
+edition = "2024"
+license = "EUPL-1.2"
+rust-version = "1.88"
+publish = false
+repository = "https://github.com/magnetite-browser/magnetite-mobile-core"
+description = "What Magnetite's phone apps share: joining a sync chain and reading its sidebar"
+
+[lib]
+name = "magnetite_mobile_core"
+# staticlib: iOS. cdylib: Android, and the bindings generator reads it.
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+# The bindings generator; only built on the development machine.
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+magnetite-core = { git = "https://github.com/magnetite-browser/magnetite", tag = "v0.0.5" }
+magnetite-sync-proto = { git = "https://github.com/magnetite-browser/magnetite-sync", tag = "v0.1.0" }
+uniffi = "0.32"
+ureq = "3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+panic = "abort"

@@ -1,0 +1,92 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# CodeRabbit reviews pull requests: useful, low noise, nothing kept or shared
+# beyond the review itself.
+language: en-US
+tone_instructions: >-
+  Be brief and concrete. Plain English. Only comment when something is wrong,
+  risky or clearly simpler another way.
+early_access: false
+
+reviews:
+  profile: chill
+  # No automatic approvals or change requests; maintainers decide.
+  auto_approvals:
+    enabled: false
+  high_level_summary: true
+  poem: false
+  in_progress_fortune: false
+  sequence_diagrams: false
+  estimate_code_review_effort: false
+  related_issues: false
+  related_prs: false
+  suggested_labels: false
+  suggested_reviewers: false
+  collapse_walkthrough: true
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches: ["^main$"]
+  path_filters:
+    - "!Cargo.lock"
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
+    title:
+      mode: warning
+      requirements: >-
+        Conventional Commits with a short subject, e.g. "fix(sync): keep the
+        tabs of a space that is gone". Types: feat, fix, docs, refactor, test,
+        build, ci, chore, perf.
+  path_instructions:
+    - path: "src/**"
+      instructions: |
+        The code both phone apps call through UniFFI. It reads the chain's sidebar and never
+        writes it; the only thing it writes to the chain is this device's own entry in the
+        `devices` collection, with the base version and a retry on a conflict. Fields it does
+        not know must survive a write. The server address must be https, except on localhost.
+        Secrets (the sync code, keys) never appear in an error text or a log. A change to an
+        exported function or type changes both apps: say so.
+    - path: "examples/**"
+      instructions: |
+        A stand-in sync server for trying the apps. It listens on localhost only and its
+        sample data uses public example addresses.
+    - path: ".github/**"
+      instructions: |
+        Workflows pin every action to a full commit SHA and ask for no more than read access.
+    - path: "**/*.md"
+      instructions: |
+        Plain, short English. Facts (commands, file names, versions) must match the
+        repository. No marketing language.
+
+chat:
+  art: false
+  auto_reply: false
+  integrations:
+    jira:
+      usage: disabled
+    linear:
+      usage: disabled
+
+knowledge_base:
+  # No data kept between reviews (learnings, indexed issues and PRs).
+  opt_out: true
+  web_search:
+    enabled: false
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - README.md
+      - CONTRIBUTING.md
+  jira:
+    usage: disabled
+  linear:
+    usage: disabled
+  mcp:
+    usage: disabled
+  automatic_linking_mode: disabled
+
+issue_enrichment:
+  auto_enrich:
+    enabled: false
+  planning:
+    enabled: false
