@@ -2,8 +2,9 @@
 //! (`docs/spec/ad-blocking.md` in magnetite): downloaded from their
 //! publishers into `filter-lists/` in the app's folder, refreshed after
 //! four days, and turned into what the app's web engine takes. On iOS that
-//! is WebKit's content rules (`webkit_content_rules`); as on the desktop,
-//! only the lists' network rules count.
+//! is WebKit's content rules (`webkit_content_rules`); on Android, whose web
+//! view asks per request, adblock-rust's engine (`request_blocker`), as the
+//! desktop runs it. As on the desktop, only the lists' network rules count.
 //!
 //! The list table, the download checks and the reading of `!#if` sections
 //! repeat the desktop's `crates/app/src/adblock.rs`; the two should become
@@ -11,6 +12,7 @@
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use adblock::lists::{FilterSet, ParseOptions, RuleTypes};
@@ -149,22 +151,9 @@ pub fn update_filter_lists(dir: String, ids: Vec<String>) -> ListsUpdate {
 /// blank a page whose address it matches.
 #[uniffi::export]
 pub fn webkit_content_rules(dir: String, ids: Vec<String>) -> Option<String> {
-    let dir = lists_dir(Path::new(&dir));
-    let mut set = FilterSet::new(true);
-    let mut any = false;
-    for id in ids.iter().filter(|id| LISTS.iter().any(|l| l.id == *id)) {
-        let Ok(text) = std::fs::read_to_string(path(&dir, id)) else {
-            continue;
-        };
-        let options = ParseOptions {
-            rule_types: RuleTypes::NetworkOnly,
-            ..ParseOptions::default()
-        };
-        set.add_filter_list(kept_for(&text, &["env_safari", "env_mobile"]), options);
-        any = true;
-    }
+    let set = filter_set(&dir, &ids, &["env_safari", "env_mobile"], true)?;
     let (rules, _) = set.into_content_blocking().ok()?;
-    if !any || rules.is_empty() {
+    if rules.is_empty() {
         return None;
     }
     let mut rules = serde_json::to_value(rules).ok()?;
@@ -174,6 +163,58 @@ pub fn webkit_content_rules(dir: String, ids: Vec<String>) -> Option<String> {
         "action": {"type": "ignore-previous-rules"}
     }));
     serde_json::to_string(&rules).ok()
+}
+
+/// adblock-rust's engine over the lists `ids` that are here, for a web view
+/// that asks per request; `None` without any. Making one takes a fraction of
+/// a second, asking it microseconds.
+#[uniffi::export]
+pub fn request_blocker(dir: String, ids: Vec<String>) -> Option<Arc<RequestBlocker>> {
+    let set = filter_set(&dir, &ids, &["env_chromium", "env_mobile"], false)?;
+    Some(Arc::new(RequestBlocker {
+        engine: adblock::Engine::new_with_filter_set(set),
+    }))
+}
+
+/// Blocks requests as the desktop's engine does (`request_blocker`).
+#[derive(uniffi::Object)]
+pub struct RequestBlocker {
+    engine: adblock::Engine,
+}
+
+#[uniffi::export]
+impl RequestBlocker {
+    /// Whether to block a `method` request for `url` of type `kind`
+    /// (adblock-rust's names: "script", "image", "stylesheet",
+    /// "xmlhttprequest", "sub_frame", "other"…) that the page at `source`
+    /// makes. Never ask about the main frame's own request: the page the
+    /// user opens is not blocked, as on the desktop, and a `$document` rule
+    /// would block it.
+    pub fn blocks(&self, url: String, source: String, kind: String, method: String) -> bool {
+        adblock::request::Request::new(&url, &source, &kind, &method)
+            .is_ok_and(|request| self.engine.check_network_request(&request).should_block())
+    }
+}
+
+/// The network rules of the lists `ids` that are here, with the `!#if`
+/// sections for `holding`; `None` when none is here. `debug` keeps the
+/// rules' text, which the conversion to content rules needs.
+fn filter_set(dir: &str, ids: &[String], holding: &[&str], debug: bool) -> Option<FilterSet> {
+    let dir = lists_dir(Path::new(dir));
+    let mut set = FilterSet::new(debug);
+    let mut any = false;
+    for id in ids.iter().filter(|id| LISTS.iter().any(|l| l.id == *id)) {
+        let Ok(text) = std::fs::read_to_string(path(&dir, id)) else {
+            continue;
+        };
+        let options = ParseOptions {
+            rule_types: RuleTypes::NetworkOnly,
+            ..ParseOptions::default()
+        };
+        set.add_filter_list(kept_for(&text, holding), options);
+        any = true;
+    }
+    any.then_some(set)
 }
 
 fn lists_dir(dir: &Path) -> PathBuf {
@@ -336,6 +377,25 @@ mod tests {
         let last = rules.as_array().unwrap().last().unwrap();
         assert_eq!(last["trigger"]["load-context"][0], "top-frame");
         assert!(webkit_content_rules(dir_s.clone(), ids(&["easyprivacy"])).is_none());
+
+        // Android asks per request: the same rules, the same exception.
+        let blocker = request_blocker(dir_s.clone(), ids(&["easylist", "ublock"])).unwrap();
+        let blocks = |url: &str, kind: &str| {
+            blocker.blocks(
+                url.into(),
+                "https://news.example/".into(),
+                kind.into(),
+                "GET".into(),
+            )
+        };
+        assert!(blocks("https://ads.example/banner.js", "script"));
+        assert!(!blocks("https://ads.example/ok.js", "script"));
+        assert!(blocks("https://news.example/ad-choices.png", "image"));
+        assert!(
+            !blocks("https://news.example/ad-choices.png", "script"),
+            "images only"
+        );
+        assert!(!blocks("https://news.example/story.js", "script"));
 
         // A list no longer chosen goes.
         let update = update_filter_lists(dir_s.clone(), Vec::new());
