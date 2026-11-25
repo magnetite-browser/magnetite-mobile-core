@@ -23,7 +23,7 @@ required-features = ["bindgen"]
 bindgen = ["uniffi/cli"]
 
 [dependencies]
-magnetite-core = { git = "https://github.com/magnetite-browser/magnetite", tag = "v0.0.5" }
+magnetite-core = { git = "https://github.com/magnetite-browser/magnetite", tag = "v0.0.14" }
 magnetite-sync-proto = { git = "https://github.com/magnetite-browser/magnetite-sync", tag = "v0.1.0" }
 uniffi = "0.32"
 ureq = "3"
