@@ -11,6 +11,7 @@
 //! `curl -X POST localhost:8787/demo/phone` a phone with tabs open.
 //! `http://localhost:8787/demo/ads` is a page with an image that EasyList
 //! blocks (`/ad-choices.png$image`): it says whether the image loaded.
+//! `…/demo/magnetite-demo.bin` is a file to download.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -297,7 +298,8 @@ impl Demo {
     }
 }
 
-/// The pages for trying content blocking: one whose image EasyList blocks.
+/// The pages for trying the apps' browsing: one whose image EasyList blocks,
+/// and a file no web view shows, so it is downloaded.
 fn page(path: &str) -> Option<(&'static str, &'static [u8])> {
     const ADS: &str = r#"<!doctype html><meta name="viewport" content="width=device-width">
 <title>Content blocking</title>
@@ -317,6 +319,7 @@ fn page(path: &str) -> Option<(&'static str, &'static [u8])> {
     match path {
         "/demo/ads" => Some(("text/html; charset=utf-8", ADS.as_bytes())),
         "/demo/ad-choices.png" => Some(("image/png", PIXEL)),
+        "/demo/magnetite-demo.bin" => Some(("application/octet-stream", &[0x4d; 4096])),
         _ => None,
     }
 }
