@@ -225,14 +225,18 @@ pub fn apply(snapshot: &mut SidebarSnapshot, change: &Change) -> Option<String> 
             if snapshot.spaces.iter().any(|s| &s.id == id) {
                 return None;
             }
-            // Until the desktop made it: the profile and colour of the first
-            // space (the desktop gives it its default profile).
+            // As the desktop makes one: its star and violet, until then the
+            // first space's profile (the desktop gives it its default one).
             let first = snapshot.spaces.first()?;
             snapshot.spaces.push(Space {
                 id: id.clone(),
                 title: title.clone(),
-                icon: icon.clone(),
-                accent: first.accent,
+                icon: icon.clone().or_else(|| Some("star".into())),
+                accent: Some(magnetite_core::Color {
+                    red: 0.55,
+                    green: 0.5,
+                    blue: 1.0,
+                }),
                 profile_id: first.profile_id.clone(),
                 pinned: Vec::new(),
                 today: Vec::new(),
