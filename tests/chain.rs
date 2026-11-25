@@ -249,3 +249,28 @@ fn only_web_pages_can_be_pinned() {
     );
     assert!(matches!(local, Err(SyncError::Address { .. })));
 }
+
+#[test]
+fn a_kind_of_change_a_newer_phone_made_does_not_stop_this_one() {
+    let (chain, server) = chain(1);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    chain.write(
+        "devices",
+        &format!(
+            r#"{{"devices":[{{"id":"tablet","name":"iPad","updated_at":{now},"tabs":[],"edits":[{{"id":"x","op":"paint_it_blue","item":"s"}}]}}]}}"#
+        ),
+    );
+    exchange(
+        server,
+        demo::DEMO_SECRET.into(),
+        phone(),
+        vec![tab("a")],
+        dir("newer"),
+    )
+    .unwrap();
+    let held: serde_json::Value = serde_json::from_str(&chain.read("devices").unwrap()).unwrap();
+    assert_eq!(held["devices"][0]["edits"][0]["op"], "paint_it_blue");
+}

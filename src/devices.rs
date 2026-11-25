@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::SyncError;
 use crate::chain::{now_ms, request};
-use crate::edits::{self, Edit};
+use crate::edits;
 
 const DEVICES: &str = "devices";
 /// An entry not written for this long is of a device that is gone.
@@ -66,9 +66,10 @@ struct Entry {
     /// Ids of other devices' tabs this device took over.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     taken: Vec<String>,
-    /// A phone's edits for a desktop to make to the sidebar.
+    /// A phone's edits for a desktop to make to the sidebar (`edits::Edit`).
+    /// Kept as they are: a kind a newer version made is no error here.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    edits: Vec<Edit>,
+    edits: Vec<serde_json::Value>,
     /// Ids of other devices' edits this device (a desktop) applied.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     applied: Vec<String>,
@@ -146,7 +147,10 @@ pub fn exchange(
             .filter(|id| done.contains(id))
             .collect();
         edits::applied(dir, &applied)?;
-        let edits = edits::pending(dir);
+        let edits: Vec<serde_json::Value> = edits::pending(dir)
+            .iter()
+            .filter_map(|e| serde_json::to_value(e).ok())
+            .collect();
 
         let before = all.devices.iter().find(|d| d.id == device.id);
         let same = match before {
