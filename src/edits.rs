@@ -313,11 +313,10 @@ fn shows(snapshot: &SidebarSnapshot, change: &Change) -> bool {
     match change {
         Change::Pin { item, .. } | Change::Favorite { item, .. } => find_tab(snapshot, item),
         Change::NewSpace { item, .. } => snapshot.spaces.iter().any(|s| &s.id == item),
-        Change::Rename { item, title } => {
-            let mut copy = snapshot.clone();
-            // Renamed already, or gone.
-            !rename(&mut copy, item, title)
-        }
+        // Not while the item is missing: the sidebar here may be older than
+        // the one that adds it, and settling the rename would settle that
+        // addition too. A rename of something gone meanwhile expires.
+        Change::Rename { item, title } => title_of(snapshot, item) == Some(title.as_str()),
         Change::Remove { item } => !find_tab(snapshot, item),
     }
 }
@@ -343,6 +342,30 @@ fn find_tab(snapshot: &SidebarSnapshot, id: &str) -> bool {
             .favorites
             .iter()
             .any(|f| f.items.iter().any(|t| t.id == id))
+}
+
+/// The name of space, folder, pinned tab or favorite `id`, if it is there.
+fn title_of<'a>(snapshot: &'a SidebarSnapshot, id: &str) -> Option<&'a str> {
+    fn in_tree<'a>(nodes: &'a [SidebarNode], id: &str) -> Option<&'a str> {
+        nodes.iter().find_map(|n| match n {
+            SidebarNode::Tab(t) if t.id == id => Some(t.title.as_str()),
+            SidebarNode::Folder(f) if f.id == id => Some(f.title.as_str()),
+            SidebarNode::Folder(f) => in_tree(&f.children, id),
+            SidebarNode::Tab(_) => None,
+        })
+    }
+    let space = snapshot.spaces.iter().find_map(|s| {
+        if s.id == id {
+            Some(s.title.as_str())
+        } else {
+            in_tree(&s.pinned, id)
+        }
+    });
+    space.or_else(|| {
+        (snapshot.favorites.iter().flat_map(|f| &f.items))
+            .find(|t| t.id == id)
+            .map(|t| t.title.as_str())
+    })
 }
 
 /// Give space, folder, pinned tab or favorite `id` the name `title`. True
@@ -536,6 +559,21 @@ mod tests {
         let mut shown = synced.clone();
         overlay(&dir, &mut shown);
         assert!(!find_tab(&shown, "n"), "the removed tab does not come back");
+    }
+
+    #[test]
+    fn a_rename_of_what_the_sidebar_here_lacks_yet_settles_nothing() {
+        let dir = dir("pinned-then-renamed");
+        let rename = Change::Rename {
+            item: "n".into(),
+            title: "Named".into(),
+        };
+        // A desktop made both; the sidebar here is still the one before.
+        made_by_a_desktop(&dir, &[pin("n"), rename]);
+        assert!(!settle(&dir, &snapshot()));
+        let mut shown = snapshot();
+        overlay(&dir, &mut shown);
+        assert_eq!(title_of(&shown, "n"), Some("Named"));
     }
 
     #[test]
