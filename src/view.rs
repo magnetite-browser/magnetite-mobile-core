@@ -29,6 +29,9 @@ pub struct Space {
     /// The pinned tree, depth first.
     pub pinned: Vec<Row>,
     pub today: Vec<Page>,
+    /// Saved addresses, in folders, depth first. Not tabs: one opens as a
+    /// new tab of the space and stays.
+    pub bookmarks: Vec<Row>,
     /// Made or renamed on this phone; no desktop has made it yet.
     pub pending: bool,
 }
@@ -130,8 +133,9 @@ pub fn sidebar(snapshot: &SidebarSnapshot, version: u64, waiting: &HashSet<Strin
                 .filter(|set| set.profile_id == space.profile_id)
                 .flat_map(|set| set.items.iter().filter_map(|t| page(t, true, waiting)))
                 .collect();
-            let mut pinned = Vec::new();
+            let (mut pinned, mut bookmarks) = (Vec::new(), Vec::new());
             rows(&space.pinned, 0, waiting, &mut pinned);
+            rows(&space.bookmarks, 0, waiting, &mut bookmarks);
             Space {
                 id: space.id.clone(),
                 title: space.title.clone(),
@@ -156,6 +160,7 @@ pub fn sidebar(snapshot: &SidebarSnapshot, version: u64, waiting: &HashSet<Strin
                     .iter()
                     .filter_map(|t| page(t, false, waiting))
                     .collect(),
+                bookmarks,
                 pending: waiting.contains(&space.id),
             }
         })
@@ -185,7 +190,13 @@ mod tests {
                 ]},
                 {"kind": "tab", "id": "t3", "url": "https://d.example/", "title": "D"}
              ],
-             "today": [{"id": "t4", "url": "https://e.example/", "title": "E"}]},
+             "today": [{"id": "t4", "url": "https://e.example/", "title": "E"}],
+             "bookmarks": [
+                {"kind": "folder", "id": "b1", "title": "Reading", "children": [
+                    {"kind": "tab", "id": "b2", "url": "https://f.example/", "title": "F"}
+                ]},
+                {"kind": "tab", "id": "b3", "url": "javascript:alert(1)", "title": "Script"}
+             ]},
             {"id": "x", "title": "Private", "profile_id": "q"}
         ]
     }"#;
@@ -215,6 +226,20 @@ mod tests {
                 (0, "https://d.example/")
             ]
         );
+    }
+
+    #[test]
+    fn bookmarks_become_rows_of_web_pages() {
+        let work = &shown().spaces[0];
+        let seen: Vec<(u32, &str)> = work
+            .bookmarks
+            .iter()
+            .map(|r| match &r.item {
+                RowItem::Folder { title, .. } => (r.depth, title.as_str()),
+                RowItem::Page { page } => (r.depth, page.url.as_str()),
+            })
+            .collect();
+        assert_eq!(seen, [(0, "Reading"), (1, "https://f.example/")]);
     }
 
     #[test]

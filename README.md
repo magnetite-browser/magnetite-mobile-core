@@ -26,7 +26,8 @@ format, the handover and the changes are described in `src/devices.rs` and
 - `src/devices.rs`: this device's tabs in the chain, and which were taken over.
 - `src/edits.rs`: this phone's changes to the sidebar, kept until a desktop
   made them.
-- `src/view.rs`: the sidebar as a phone shows it.
+- `src/view.rs`: the sidebar as a phone shows it, with each space's
+  bookmarks.
 - `src/history.rs`: the pages visited on the phone, as the desktop keeps
   them (address, title, time; never synced), with the address field's
   suggestions from them.
