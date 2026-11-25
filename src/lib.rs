@@ -5,7 +5,8 @@
 //! whole, without merging, so a phone that wrote it would overwrite what a
 //! desktop changed since the phone's last sync. What a phone writes is its
 //! own entry in the `devices` collection (`devices` module): the tabs open
-//! on it, which another device can take over.
+//! on it, which another device can take over, and its changes to the
+//! sidebar, which a desktop makes (`edits` module).
 //!
 //! The apps call the functions below through UniFFI; every one of them
 //! blocks, so call them off the main thread. The sync code's secret is
@@ -14,6 +15,9 @@
 
 mod chain;
 mod devices;
+/// Public for Rust callers that play a desktop (the demo server); the apps
+/// use the functions below.
+pub mod edits;
 mod view;
 
 use std::path::Path;
@@ -72,27 +76,126 @@ pub fn refresh(server: String, secret: String, dir: String) -> Result<Option<Sid
     chain::refresh(&server, &secret, Path::new(&dir))
 }
 
-/// The sidebar last read, for a start without a connection.
+/// The sidebar last read, for a start without a connection, with this
+/// phone's changes on top.
 #[uniffi::export]
 pub fn cached(dir: String) -> Option<Sidebar> {
     chain::cached(Path::new(&dir))
 }
 
-/// Forget the sidebar kept in `dir` (the device leaves the chain).
+/// Forget the sidebar kept in `dir` and the changes not made yet (the
+/// device leaves the chain).
 #[uniffi::export]
 pub fn forget(dir: String) {
     chain::forget(Path::new(&dir));
 }
 
-/// Tell the chain which `tabs` are open on this `device`, and learn which of
-/// them another device took over since: their ids are returned, and the app
-/// closes those tabs. Writes only when the tabs changed.
+/// Tell the chain which `tabs` are open on this `device`, and the changes to
+/// the sidebar kept in `dir` that no desktop made yet; learn which tabs
+/// another device took over since: their ids are returned, and the app
+/// closes those tabs. Writes only when the tabs or changes did.
 #[uniffi::export]
 pub fn exchange(
     server: String,
     secret: String,
     device: Device,
     tabs: Vec<DeviceTab>,
+    dir: String,
 ) -> Result<Vec<String>, SyncError> {
-    devices::exchange(&server, &secret, &device, tabs)
+    devices::exchange(&server, &secret, &device, tabs, Path::new(&dir))
+}
+
+// Changes to the sidebar. A desktop of the chain makes them (`edits`); until
+// then the sidebar kept in `dir` shows them, marked `pending`. Each returns
+// that sidebar; `None` when none is kept (the device is in no chain). Run
+// `exchange` after, so the chain hears of the change.
+
+/// Pin `url` in `space`, last in its pinned tree.
+#[uniffi::export]
+pub fn pin(
+    dir: String,
+    space: String,
+    url: String,
+    title: String,
+) -> Result<Option<Sidebar>, SyncError> {
+    let (id, url) = (edits::new_id(), web_address(&url)?);
+    change(
+        &dir,
+        edits::Change::Pin {
+            space,
+            item: id,
+            url,
+            title,
+        },
+    )
+}
+
+/// Make `url` a favorite of `space`'s profile, after the others.
+#[uniffi::export]
+pub fn add_favorite(
+    dir: String,
+    space: String,
+    url: String,
+    title: String,
+) -> Result<Option<Sidebar>, SyncError> {
+    let (id, url) = (edits::new_id(), web_address(&url)?);
+    change(
+        &dir,
+        edits::Change::Favorite {
+            space,
+            item: id,
+            url,
+            title,
+        },
+    )
+}
+
+/// A new space named `title`, after the others; `icon`: one of the
+/// desktop's glyph names, or none for its default.
+#[uniffi::export]
+pub fn new_space(
+    dir: String,
+    title: String,
+    icon: Option<String>,
+) -> Result<Option<Sidebar>, SyncError> {
+    let id = edits::new_id();
+    change(
+        &dir,
+        edits::Change::NewSpace {
+            item: id,
+            title,
+            icon,
+        },
+    )
+}
+
+/// Name the space, folder, pinned tab or favorite `item` `title`.
+#[uniffi::export]
+pub fn rename(dir: String, item: String, title: String) -> Result<Option<Sidebar>, SyncError> {
+    change(&dir, edits::Change::Rename { item, title })
+}
+
+/// Unpin pinned tab `item`, or remove favorite `item`. The desktop keeps a
+/// pinned tab in its archive.
+#[uniffi::export]
+pub fn remove(dir: String, item: String) -> Result<Option<Sidebar>, SyncError> {
+    change(&dir, edits::Change::Remove { item })
+}
+
+fn change(dir: &str, change: edits::Change) -> Result<Option<Sidebar>, SyncError> {
+    let dir = Path::new(dir);
+    edits::propose(dir, change)?;
+    Ok(chain::cached(dir))
+}
+
+/// Only web pages go into the sidebar from a phone.
+fn web_address(url: &str) -> Result<String, SyncError> {
+    let url = url.trim();
+    if url.starts_with("https://") || url.starts_with("http://") {
+        Ok(url.to_string())
+    } else {
+        Err(SyncError::Address {
+            reason: format!("only web pages can be added: {url}"),
+        })
+    }
 }

@@ -11,6 +11,7 @@ use magnetite_sync_proto::{ChainKeys, CollectionResponse, SyncCode};
 use serde::{Deserialize, Serialize};
 
 use crate::SyncError;
+use crate::edits;
 use crate::view::{self, Sidebar};
 
 const SIDEBAR: &str = "sidebar";
@@ -44,11 +45,18 @@ fn keep(dir: &Path, kept: &Kept) -> std::io::Result<()> {
 }
 
 pub fn cached(dir: &Path) -> Option<Sidebar> {
-    kept(dir).map(|k| view::sidebar(&k.snapshot, k.version))
+    kept(dir).map(|k| shown(dir, k))
+}
+
+/// `kept` with this phone's edits on top.
+fn shown(dir: &Path, mut kept: Kept) -> Sidebar {
+    let waiting = edits::overlay(dir, &mut kept.snapshot);
+    view::sidebar(&kept.snapshot, kept.version, &waiting)
 }
 
 pub fn forget(dir: &Path) {
     std::fs::remove_file(kept_path(dir)).ok();
+    edits::forget(dir);
 }
 
 /// The address requests go to (no trailing slash). The server must use
@@ -245,7 +253,8 @@ pub fn refresh(server: &str, secret: &str, dir: &Path) -> Result<Option<Sidebar>
     keep(dir, &kept).map_err(|e| SyncError::Storage {
         reason: format!("cannot keep the sidebar on this device: {e}"),
     })?;
-    Ok(Some(view::sidebar(&kept.snapshot, kept.version)))
+    edits::settle(dir, &kept.snapshot);
+    Ok(Some(shown(dir, kept)))
 }
 
 #[cfg(test)]

@@ -1,5 +1,6 @@
-//! The chain's `devices` collection: per device the tabs open on it, and
-//! the tabs of other devices it took over.
+//! The chain's `devices` collection: per device the tabs open on it, the
+//! tabs of other devices it took over, and a phone's edits to the sidebar
+//! (`edits`) with the ids of those a desktop applied.
 //!
 //! Every device changes only its own entry and writes the collection as the
 //! version after the one it read; when another device wrote first, it reads
@@ -11,11 +12,14 @@
 //! listing it; B then drops the id. A tab with `later` asks for that: the
 //! device that sees it takes it by itself ("send to desktop").
 
+use std::path::Path;
+
 use magnetite_sync_proto::{CollectionResponse, PutCollectionRequest, SyncCode};
 use serde::{Deserialize, Serialize};
 
 use crate::SyncError;
 use crate::chain::{now_ms, request};
+use crate::edits::{self, Edit};
 
 const DEVICES: &str = "devices";
 /// An entry not written for this long is of a device that is gone.
@@ -62,6 +66,12 @@ struct Entry {
     /// Ids of other devices' tabs this device took over.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     taken: Vec<String>,
+    /// A phone's edits for a desktop to make to the sidebar.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    edits: Vec<Edit>,
+    /// Ids of other devices' edits this device (a desktop) applied.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    applied: Vec<String>,
     #[serde(flatten)]
     other: Other,
 }
@@ -79,6 +89,7 @@ pub fn exchange(
     secret: &str,
     device: &Device,
     tabs: Vec<DeviceTab>,
+    dir: &Path,
 ) -> Result<Vec<String>, SyncError> {
     let unreadable = |reason: &str| SyncError::Unreadable {
         reason: reason.to_string(),
@@ -122,12 +133,26 @@ pub fn exchange(
             .filter(|t| taken_by_others.contains(&&t.id))
             .map(|t| t.id.clone())
             .collect();
+        // The edits a desktop applied are no longer listed.
+        let done: Vec<String> = all
+            .devices
+            .iter()
+            .filter(|d| d.id != device.id)
+            .flat_map(|d| d.applied.iter().cloned())
+            .collect();
+        let applied: Vec<String> = edits::pending(dir)
+            .into_iter()
+            .map(|e| e.id)
+            .filter(|id| done.contains(id))
+            .collect();
+        edits::applied(dir, &applied)?;
+        let edits = edits::pending(dir);
 
         let before = all.devices.iter().find(|d| d.id == device.id);
         let same = match before {
-            Some(e) => e.name == device.name && e.tabs == tabs,
-            // A device without tabs needs no entry.
-            None => tabs.is_empty(),
+            Some(e) => e.name == device.name && e.tabs == tabs && e.edits == edits,
+            // A device without tabs or edits needs no entry.
+            None => tabs.is_empty() && edits.is_empty(),
         };
         if same {
             return Ok(taken);
@@ -138,6 +163,8 @@ pub fn exchange(
             updated_at: now,
             tabs: tabs.clone(),
             taken: before.map(|e| e.taken.clone()).unwrap_or_default(),
+            edits,
+            applied: Vec::new(),
             other: before.map(|e| e.other.clone()).unwrap_or_default(),
         };
         all.devices
