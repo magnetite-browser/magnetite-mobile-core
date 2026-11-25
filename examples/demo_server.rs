@@ -216,8 +216,11 @@ impl Demo {
 
     /// Answer requests on `listener` for ever.
     pub fn serve(&self, listener: &TcpListener) {
+        // Each connection on its own thread: a browser opens connections
+        // ahead that it sends nothing on, which would hold up the others.
         for stream in listener.incoming().flatten() {
-            self.answer(stream);
+            let demo = self.clone();
+            std::thread::spawn(move || demo.answer(stream));
         }
     }
 
