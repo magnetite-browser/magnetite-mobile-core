@@ -9,6 +9,9 @@
 //! every tab the phones list, `curl -X POST localhost:8787/demo/apply` one
 //! that makes the changes the phones asked for, and
 //! `curl -X POST localhost:8787/demo/phone` a phone with tabs open.
+//! `http://localhost:8787/demo/ads` is a page with an image that EasyList
+//! blocks (`/ad-choices.png$image`): it says whether the image loaded.
+//! `…/demo/magnetite-demo.bin` is a file to download.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -233,6 +236,15 @@ impl Demo {
             words.next().unwrap_or_default(),
             words.next().unwrap_or_default(),
         );
+        if let Some((kind, page)) = page(path) {
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: {kind}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                page.len()
+            );
+            let _ = stream.write_all(page);
+            return;
+        }
         let (status, answer) = self.reply(method, path, &body);
         let _ = write!(
             stream,
@@ -283,6 +295,32 @@ impl Demo {
             }
             _ => ("405 Method Not Allowed", String::new()),
         }
+    }
+}
+
+/// The pages for trying the apps' browsing: one whose image EasyList blocks,
+/// and a file no web view shows, so it is downloaded.
+fn page(path: &str) -> Option<(&'static str, &'static [u8])> {
+    const ADS: &str = r#"<!doctype html><meta name="viewport" content="width=device-width">
+<title>Content blocking</title>
+<h1>Content blocking</h1>
+<p id="state">Loading the ad…</p>
+<img src="/demo/ad-choices.png" alt="" width="1" height="1"
+  onload="state.textContent = 'The ad loaded'" onerror="state.textContent = 'The ad was blocked'">
+"#;
+    /// A transparent pixel.
+    const PIXEL: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x04, 0x00, 0x00, 0x00, 0xb5,
+        0x1c, 0x0c, 0x02, 0x00, 0x00, 0x00, 0x0b, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0x64,
+        0x60, 0x00, 0x00, 0x00, 0x06, 0x00, 0x02, 0x30, 0x81, 0xd0, 0x2f, 0x00, 0x00, 0x00, 0x00,
+        0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    match path {
+        "/demo/ads" => Some(("text/html; charset=utf-8", ADS.as_bytes())),
+        "/demo/ad-choices.png" => Some(("image/png", PIXEL)),
+        "/demo/magnetite-demo.bin" => Some(("application/octet-stream", &[0x4d; 4096])),
+        _ => None,
     }
 }
 

@@ -6,7 +6,7 @@ license = "EUPL-1.2"
 rust-version = "1.88"
 publish = false
 repository = "https://github.com/magnetite-browser/magnetite-mobile-core"
-description = "What Magnetite's phone apps share: joining a sync chain and reading its sidebar"
+description = "What Magnetite's phone apps share: joining a sync chain and reading its sidebar, history, content blocking"
 
 [lib]
 name = "magnetite_mobile_core"
@@ -31,6 +31,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 getrandom = "0.4"
+# The desktop's filter engine; on iOS only its conversion to WebKit's content rules.
+adblock = { version = "0.13", default-features = false, features = ["content-blocking", "embedded-domain-resolver", "full-regex-handling"] }
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }
