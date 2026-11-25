@@ -236,7 +236,7 @@ impl History {
         };
         inner.written_at = now();
         // Tried again with the next change when it fails.
-        inner.changed = write(&self.path, &data).is_err();
+        inner.changed = crate::files::write_private(&self.path, &data).is_err();
     }
 }
 
@@ -325,24 +325,6 @@ fn site(url: &str) -> &str {
     let host = rest.split(['/', '?', '#']).next().unwrap_or(rest);
     let host = host.rsplit_once('@').map_or(host, |(_, host)| host);
     host.strip_prefix("www.").unwrap_or(host)
-}
-
-/// Write `data` whole, readable by its owner only.
-fn write(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    use std::io::Write;
-    #[cfg(unix)]
-    use std::os::unix::fs::OpenOptionsExt;
-
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    let part = path.with_extension("json.part");
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    options.open(&part)?.write_all(data)?;
-    std::fs::rename(part, path)
 }
 
 fn now() -> i64 {

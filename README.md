@@ -30,12 +30,18 @@ format, the handover and the changes are described in `src/devices.rs` and
 - `src/history.rs`: the pages visited on the phone, as the desktop keeps
   them (address, title, time; never synced), with the address field's
   suggestions from them.
+- `src/blocking.rs`: content blocking with the desktop's filter lists
+  (downloaded from their publishers, refreshed after four days) and
+  [adblock-rust](https://github.com/brave/adblock-rust), the desktop's
+  filter engine. For iOS it turns the lists' network rules into WebKit's
+  content rules, one set for all lists.
 - `scripts/ios.sh <dir>`: builds an XCFramework and the Swift bindings.
 - `scripts/android.sh <dir>`: builds the libraries per ABI and the Kotlin
   bindings (needs `cargo-ndk` and `ANDROID_NDK_HOME`).
 - `examples/demo_server.rs`: a stand-in sync server with a sample chain, for
   trying the apps (`cargo run --example demo_server`; it says at its top how
-  to play a desktop that takes tabs over or makes a phone's changes).
+  to play a desktop that takes tabs over or makes a phone's changes;
+  `/demo/ads` is a page with an image EasyList blocks).
 
 ```sh
 cargo test

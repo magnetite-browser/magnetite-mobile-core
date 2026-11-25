@@ -7,23 +7,27 @@
 //! own entry in the `devices` collection (`devices` module): the tabs open
 //! on it, which another device can take over, and its changes to the
 //! sidebar, which a desktop makes (`edits` module). The phone's history
-//! (`History`) stays on the phone.
+//! (`History`) stays on the phone, and so do its filter lists for content
+//! blocking (`blocking` module).
 //!
 //! The apps call the functions below through UniFFI; every one of them
 //! blocks, so call them off the main thread. The sync code's secret is
 //! handed back to the app, which keeps it in the system's key store: this
 //! crate writes only the sidebar it last read.
 
+mod blocking;
 mod chain;
 mod devices;
 /// Public for Rust callers that play a desktop (the demo server); the apps
 /// use the functions below.
 pub mod edits;
+mod files;
 mod history;
 mod view;
 
 use std::path::Path;
 
+pub use blocking::{FilterList, ListsUpdate};
 pub use devices::{Device, DeviceTab};
 pub use history::{History, Visit};
 pub use view::{Accent, Page, Row, RowItem, Sidebar, Space};
