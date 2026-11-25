@@ -6,7 +6,8 @@ mod demo;
 use std::net::TcpListener;
 
 use magnetite_mobile_core::{
-    Device, DeviceTab, RowItem, SyncError, cached, exchange, join, refresh,
+    Device, DeviceTab, RowItem, SyncError, add_favorite, cached, exchange, join, new_space, pin,
+    refresh, rename,
 };
 use magnetite_sync_proto::SyncCode;
 
@@ -96,9 +97,15 @@ fn a_device_lists_its_tabs_and_leaves_the_other_entries_alone() {
     let secret = demo::DEMO_SECRET.to_string();
     // Nothing open: nothing written.
     assert!(
-        exchange(server.clone(), secret.clone(), phone(), vec![])
-            .unwrap()
-            .is_empty()
+        exchange(
+            server.clone(),
+            secret.clone(),
+            phone(),
+            vec![],
+            dir("lists")
+        )
+        .unwrap()
+        .is_empty()
     );
     assert_eq!(chain.read("devices"), None);
 
@@ -117,6 +124,7 @@ fn a_device_lists_its_tabs_and_leaves_the_other_entries_alone() {
         secret.clone(),
         phone(),
         vec![tab("a"), tab("b")],
+        dir("lists"),
     )
     .unwrap();
     assert_eq!(taken, ["b"]);
@@ -131,7 +139,14 @@ fn a_device_lists_its_tabs_and_leaves_the_other_entries_alone() {
 
     // The same tabs again: no new version.
     let before = chain.read("devices");
-    exchange(server, secret, phone(), vec![tab("a"), tab("b")]).unwrap();
+    exchange(
+        server,
+        secret,
+        phone(),
+        vec![tab("a"), tab("b")],
+        dir("lists"),
+    )
+    .unwrap();
     assert_eq!(chain.read("devices"), before);
 }
 
@@ -142,8 +157,120 @@ fn entries_of_devices_long_gone_are_dropped() {
         "devices",
         r#"{"devices":[{"id":"old","name":"Old phone","updated_at":1,"tabs":[]}]}"#,
     );
-    exchange(server, demo::DEMO_SECRET.into(), phone(), vec![tab("a")]).unwrap();
+    exchange(
+        server,
+        demo::DEMO_SECRET.into(),
+        phone(),
+        vec![tab("a")],
+        dir("gone"),
+    )
+    .unwrap();
     let held: serde_json::Value = serde_json::from_str(&chain.read("devices").unwrap()).unwrap();
     assert_eq!(held["devices"].as_array().unwrap().len(), 1);
     assert_eq!(held["devices"][0]["id"], "phone");
+}
+
+#[test]
+fn a_change_made_on_the_phone_waits_for_a_desktop_then_is_the_chains() {
+    let (chain, server) = chain(1);
+    let (secret, dir) = (demo::DEMO_SECRET.to_string(), dir("changes"));
+    refresh(server.clone(), secret.clone(), dir.clone()).unwrap();
+
+    // Shown at once, marked as waiting.
+    let shown = pin(
+        dir.clone(),
+        "space-work".into(),
+        "https://docs.rs/".into(),
+        "Docs".into(),
+    )
+    .unwrap()
+    .unwrap();
+    let RowItem::Page { page } = &shown.spaces[1].pinned.last().unwrap().item else {
+        panic!("a pinned page")
+    };
+    assert!(page.pending && page.title == "Docs");
+    let pinned = page.id.clone();
+    add_favorite(
+        dir.clone(),
+        "space-work".into(),
+        "https://lib.rs/".into(),
+        "Lib".into(),
+    )
+    .unwrap();
+    rename(dir.clone(), "space-home".into(), "House".into()).unwrap();
+    let shown = new_space(dir.clone(), "Trip".into(), Some("plane".into()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(shown.spaces[0].title, "House");
+    assert!(shown.spaces[2].pending && shown.spaces[2].title == "Trip");
+
+    // The chain hears of them; a desktop makes them and says so.
+    exchange(server.clone(), secret.clone(), phone(), vec![], dir.clone()).unwrap();
+    assert_eq!(chain.apply_all(), 4);
+    exchange(server.clone(), secret.clone(), phone(), vec![], dir.clone()).unwrap();
+    let held: serde_json::Value = serde_json::from_str(&chain.read("devices").unwrap()).unwrap();
+    let mine = held["devices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["id"] == "phone");
+    assert!(
+        mine.is_some_and(|d| d.get("edits").is_none()),
+        "listed no more"
+    );
+
+    // The new sidebar has them all, none waiting any more.
+    let synced = refresh(server, secret, dir.clone()).unwrap().unwrap();
+    assert_eq!(synced.spaces[0].title, "House");
+    assert_eq!(synced.spaces[2].title, "Trip");
+    let RowItem::Page { page } = &synced.spaces[1].pinned.last().unwrap().item else {
+        panic!("a pinned page")
+    };
+    assert_eq!(page.id, pinned);
+    assert!(!page.pending && !synced.spaces[2].pending);
+    assert!(
+        synced.spaces[1]
+            .favorites
+            .iter()
+            .any(|f| f.title == "Lib" && !f.pending)
+    );
+    assert_eq!(cached(dir), Some(synced));
+}
+
+#[test]
+fn only_web_pages_can_be_pinned() {
+    let dir = dir("web");
+    refresh(server(1), demo::DEMO_SECRET.into(), dir.clone()).unwrap();
+    let local = pin(
+        dir,
+        "space-home".into(),
+        "file:///etc/hosts".into(),
+        "Hosts".into(),
+    );
+    assert!(matches!(local, Err(SyncError::Address { .. })));
+}
+
+#[test]
+fn a_kind_of_change_a_newer_phone_made_does_not_stop_this_one() {
+    let (chain, server) = chain(1);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    chain.write(
+        "devices",
+        &format!(
+            r#"{{"devices":[{{"id":"tablet","name":"iPad","updated_at":{now},"tabs":[],"edits":[{{"id":"x","op":"paint_it_blue","item":"s"}}]}}]}}"#
+        ),
+    );
+    exchange(
+        server,
+        demo::DEMO_SECRET.into(),
+        phone(),
+        vec![tab("a")],
+        dir("newer"),
+    )
+    .unwrap();
+    let held: serde_json::Value = serde_json::from_str(&chain.read("devices").unwrap()).unwrap();
+    assert_eq!(held["devices"][0]["edits"][0]["op"], "paint_it_blue");
 }

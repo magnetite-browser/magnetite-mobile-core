@@ -2,10 +2,12 @@
 //! sample sidebar and takes writes of other collections, in memory. It
 //! checks no signatures.
 //!
-//! `cargo run --example demo_server` listens on 127.0.0.1:8787 and prints the
-//! 24 words to join with. A simulator on this machine reaches it as
-//! `http://localhost:8787`. `curl -X POST localhost:8787/demo/take` plays a
-//! desktop that takes over every tab the phones list, and
+//! `cargo run --example demo_server` listens on 127.0.0.1:8787 (another port
+//! with `DEMO_PORT=…`, to run several) and prints the 24 words to join with.
+//! A simulator on this machine reaches it as `http://localhost:8787`.
+//! `curl -X POST localhost:8787/demo/take` plays a desktop that takes over
+//! every tab the phones list, `curl -X POST localhost:8787/demo/apply` one
+//! that makes the changes the phones asked for, and
 //! `curl -X POST localhost:8787/demo/phone` a phone with tabs open.
 
 use std::collections::HashMap;
@@ -37,7 +39,7 @@ pub const SIDEBAR: &str = r#"{
     ]}
   ],
   "spaces": [
-    {"id": "space-home", "title": "Home", "icon": "🏡", "accent": {"red": 0.89, "green": 0.38, "blue": 0.17},
+    {"id": "space-home", "title": "Home", "icon": "home", "accent": {"red": 0.89, "green": 0.38, "blue": 0.17},
      "profile_id": "3b1f0a52-6c1e-4f0a-9d53-0a1e7c1b2a01",
      "pinned": [
        {"kind": "tab", "id": "pin-1", "url": "https://magnetitebrowser.org/", "title": "Magnetite", "home_url": "https://magnetitebrowser.org/"},
@@ -51,7 +53,7 @@ pub const SIDEBAR: &str = r#"{
      "today": [
        {"id": "today-1", "url": "https://example.com/", "title": "Example Domain"}
      ]},
-    {"id": "space-work", "title": "Work", "accent": {"red": 0.2, "green": 0.5, "blue": 0.9},
+    {"id": "space-work", "title": "Work", "icon": "briefcase", "accent": {"red": 0.2, "green": 0.5, "blue": 0.9},
      "profile_id": "9c2e7d14-2b7a-4c55-8e01-5d7f3a9b6c02",
      "pinned": [
        {"kind": "tab", "id": "pin-4", "url": "https://github.com/magnetite-browser/magnetite", "title": "magnetite", "home_url": "https://github.com/magnetite-browser/magnetite"}
@@ -141,7 +143,7 @@ impl Demo {
             .and_then(|plain| serde_json::from_str(&plain).ok())
             .unwrap_or_else(|| serde_json::json!({ "devices": [] }));
         let devices = all["devices"].as_array_mut().expect("devices");
-        devices.retain(|d| d["id"] != "demo-desktop");
+        let mut me = desktop(devices);
         let taken: Vec<serde_json::Value> = devices
             .iter()
             .flat_map(|d| d["tabs"].as_array().cloned().unwrap_or_default())
@@ -150,11 +152,53 @@ impl Demo {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
-        devices.push(serde_json::json!({
-            "id": "demo-desktop", "name": "Demo desktop", "updated_at": now, "tabs": [], "taken": taken,
-        }));
+        let count = taken.len();
+        me["taken"] = taken.into();
+        me["updated_at"] = now.into();
+        devices.push(me);
         self.write("devices", &all.to_string());
-        taken.len()
+        count
+    }
+
+    /// Play a desktop that makes the changes to the sidebar the other
+    /// devices asked for, writes the sidebar and says which it made
+    /// (`POST /demo/apply`). Returns how many.
+    pub fn apply_all(&self) -> usize {
+        use magnetite_mobile_core::edits::{Edit, apply};
+        let mut all: serde_json::Value = self
+            .read("devices")
+            .and_then(|plain| serde_json::from_str(&plain).ok())
+            .unwrap_or_else(|| serde_json::json!({ "devices": [] }));
+        let devices = all["devices"].as_array_mut().expect("devices");
+        let mut me = desktop(devices);
+        let before: Vec<serde_json::Value> = me["applied"].as_array().cloned().unwrap_or_default();
+        let edits: Vec<Edit> = devices
+            .iter()
+            .flat_map(|d| d["edits"].as_array().cloned().unwrap_or_default())
+            .filter_map(|e| serde_json::from_value(e).ok())
+            .filter(|e: &Edit| !before.contains(&serde_json::Value::from(e.id.clone())))
+            .collect();
+        if edits.is_empty() {
+            return 0;
+        }
+        let mut sidebar: magnetite_core::SidebarSnapshot =
+            serde_json::from_str(&self.read("sidebar").expect("a sidebar")).expect("the sidebar");
+        for edit in &edits {
+            apply(&mut sidebar, &edit.change);
+        }
+        self.write("sidebar", &serde_json::to_string(&sidebar).expect("json"));
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let applied: Vec<serde_json::Value> = before
+            .into_iter()
+            .chain(edits.iter().map(|e| e.id.clone().into()))
+            .collect();
+        me["applied"] = applied.into();
+        me["updated_at"] = now.into();
+        devices.push(me);
+        self.write("devices", &all.to_string());
+        edits.len()
     }
 
     /// Answer requests on `listener` for ever.
@@ -208,6 +252,9 @@ impl Demo {
         if path == "/demo/take" {
             return ("200 OK", format!("{}\n", self.take_all()));
         }
+        if path == "/demo/apply" {
+            return ("200 OK", format!("{}\n", self.apply_all()));
+        }
         let Some(id) = path.strip_prefix("/v2/collections/") else {
             return ("404 Not Found", String::new());
         };
@@ -239,12 +286,23 @@ impl Demo {
     }
 }
 
+/// The demo desktop's entry, taken out of `devices` to be changed and put
+/// back, so what it took and what it made both stay.
+fn desktop(devices: &mut Vec<serde_json::Value>) -> serde_json::Value {
+    match devices.iter().position(|d| d["id"] == "demo-desktop") {
+        Some(i) => devices.remove(i),
+        None => serde_json::json!({ "id": "demo-desktop", "name": "Demo desktop", "tabs": [] }),
+    }
+}
+
 #[allow(dead_code)]
 fn main() {
-    let listener = TcpListener::bind("127.0.0.1:8787").expect("port 8787 is taken");
+    let port = std::env::var("DEMO_PORT").unwrap_or_else(|_| "8787".into());
+    let listener = TcpListener::bind(format!("127.0.0.1:{port}"))
+        .unwrap_or_else(|_| panic!("port {port} is taken"));
     let code = SyncCode::from_base64(DEMO_SECRET).expect("demo code");
     println!(
-        "Demo sync server on http://localhost:8787\nSync code: {}",
+        "Demo sync server on http://localhost:{port}\nSync code: {}",
         code.words()
     );
     Demo::new(1).serve(&listener);

@@ -1,5 +1,8 @@
 //! The sidebar as a phone shows it: per space its favorites, the pinned tree
-//! as rows with a depth, and the Today tabs.
+//! as rows with a depth, and the Today tabs. What this phone changed and a
+//! desktop has not made yet is in it, marked `pending` (`edits`).
+
+use std::collections::HashSet;
 
 use magnetite_core::{SidebarNode, SidebarSnapshot, TabItem};
 
@@ -26,6 +29,8 @@ pub struct Space {
     /// The pinned tree, depth first.
     pub pinned: Vec<Row>,
     pub today: Vec<Page>,
+    /// Made or renamed on this phone; no desktop has made it yet.
+    pub pending: bool,
 }
 
 /// sRGB, 0.0 to 1.0 per channel.
@@ -41,6 +46,8 @@ pub struct Page {
     pub id: String,
     pub url: String,
     pub title: String,
+    /// Added or renamed on this phone; no desktop has made it yet.
+    pub pending: bool,
 }
 
 /// One row of the pinned tree; `depth` 0 is the top level.
@@ -58,6 +65,8 @@ pub enum RowItem {
         id: String,
         title: String,
         smart: bool,
+        /// Renamed on this phone; no desktop has made it yet.
+        pending: bool,
     },
     Page {
         page: Page,
@@ -67,7 +76,7 @@ pub enum RowItem {
 /// A page a phone can open: web addresses only. `home` picks where pinned
 /// tabs and favorites open: at their home address, not where the desktop
 /// last left them.
-fn page(tab: &TabItem, home: bool) -> Option<Page> {
+fn page(tab: &TabItem, home: bool, waiting: &HashSet<String>) -> Option<Page> {
     let url = match &tab.home_url {
         Some(h) if home => h,
         _ => &tab.url,
@@ -77,14 +86,15 @@ fn page(tab: &TabItem, home: bool) -> Option<Page> {
         id: tab.id.clone(),
         url: url.clone(),
         title: tab.title.clone(),
+        pending: waiting.contains(&tab.id),
     })
 }
 
-fn rows(nodes: &[SidebarNode], depth: u32, out: &mut Vec<Row>) {
+fn rows(nodes: &[SidebarNode], depth: u32, waiting: &HashSet<String>, out: &mut Vec<Row>) {
     for node in nodes {
         match node {
             SidebarNode::Tab(tab) => {
-                if let Some(page) = page(tab, true) {
+                if let Some(page) = page(tab, true, waiting) {
                     out.push(Row {
                         depth,
                         item: RowItem::Page { page },
@@ -98,15 +108,18 @@ fn rows(nodes: &[SidebarNode], depth: u32, out: &mut Vec<Row>) {
                         id: folder.id.clone(),
                         title: folder.title.clone(),
                         smart: folder.smart.is_some(),
+                        pending: waiting.contains(&folder.id),
                     },
                 });
-                rows(&folder.children, depth + 1, out);
+                rows(&folder.children, depth + 1, waiting, out);
             }
         }
     }
 }
 
-pub fn sidebar(snapshot: &SidebarSnapshot, version: u64) -> Sidebar {
+/// `snapshot` at `version` as a phone shows it; `waiting`: the ids of what
+/// this phone's edits added or renamed.
+pub fn sidebar(snapshot: &SidebarSnapshot, version: u64, waiting: &HashSet<String>) -> Sidebar {
     let spaces = snapshot
         .spaces
         .iter()
@@ -115,10 +128,10 @@ pub fn sidebar(snapshot: &SidebarSnapshot, version: u64) -> Sidebar {
                 .favorites
                 .iter()
                 .filter(|set| set.profile_id == space.profile_id)
-                .flat_map(|set| set.items.iter().filter_map(|t| page(t, true)))
+                .flat_map(|set| set.items.iter().filter_map(|t| page(t, true, waiting)))
                 .collect();
             let mut pinned = Vec::new();
-            rows(&space.pinned, 0, &mut pinned);
+            rows(&space.pinned, 0, waiting, &mut pinned);
             Space {
                 id: space.id.clone(),
                 title: space.title.clone(),
@@ -138,7 +151,12 @@ pub fn sidebar(snapshot: &SidebarSnapshot, version: u64) -> Sidebar {
                     .any(|p| p.id == space.profile_id && p.ephemeral),
                 favorites,
                 pinned,
-                today: space.today.iter().filter_map(|t| page(t, false)).collect(),
+                today: space
+                    .today
+                    .iter()
+                    .filter_map(|t| page(t, false, waiting))
+                    .collect(),
+                pending: waiting.contains(&space.id),
             }
         })
         .collect();
@@ -173,7 +191,7 @@ mod tests {
     }"#;
 
     fn shown() -> Sidebar {
-        sidebar(&serde_json::from_str(SNAPSHOT).unwrap(), 7)
+        sidebar(&serde_json::from_str(SNAPSHOT).unwrap(), 7, &HashSet::new())
     }
 
     #[test]
