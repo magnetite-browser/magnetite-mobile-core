@@ -6,7 +6,8 @@
 //! desktop changed since the phone's last sync. What a phone writes is its
 //! own entry in the `devices` collection (`devices` module): the tabs open
 //! on it, which another device can take over, and its changes to the
-//! sidebar, which a desktop makes (`edits` module).
+//! sidebar, which a desktop makes (`edits` module). The phone's history
+//! (`History`) stays on the phone.
 //!
 //! The apps call the functions below through UniFFI; every one of them
 //! blocks, so call them off the main thread. The sync code's secret is
@@ -18,11 +19,13 @@ mod devices;
 /// Public for Rust callers that play a desktop (the demo server); the apps
 /// use the functions below.
 pub mod edits;
+mod history;
 mod view;
 
 use std::path::Path;
 
 pub use devices::{Device, DeviceTab};
+pub use history::{History, Visit};
 pub use view::{Accent, Page, Row, RowItem, Sidebar, Space};
 
 uniffi::setup_scaffolding!();
