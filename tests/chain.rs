@@ -238,6 +238,53 @@ fn a_change_made_on_the_phone_waits_for_a_desktop_then_is_the_chains() {
 }
 
 #[test]
+fn a_change_made_is_settled_at_once_so_a_later_one_on_the_desktop_stands() {
+    let (chain, server) = chain(1);
+    let (secret, dir) = (demo::DEMO_SECRET.to_string(), dir("settled"));
+    refresh(server.clone(), secret.clone(), dir.clone()).unwrap();
+    let shown = pin(
+        dir.clone(),
+        "space-work".into(),
+        "https://docs.rs/".into(),
+        "Docs".into(),
+    )
+    .unwrap()
+    .unwrap();
+    let RowItem::Page { page } = &shown.spaces[1].pinned.last().unwrap().item else {
+        panic!("a pinned page")
+    };
+    let pinned = page.id.clone();
+    exchange(server.clone(), secret.clone(), phone(), vec![], dir.clone()).unwrap();
+    assert_eq!(chain.apply_all(), 1);
+
+    // A sync as the apps run it: the sidebar first (it has the pin), then
+    // the devices (a desktop made it).
+    refresh(server.clone(), secret.clone(), dir.clone()).unwrap();
+    exchange(server.clone(), secret.clone(), phone(), vec![], dir.clone()).unwrap();
+
+    // The pin goes again on the desktop; the phone does not bring it back.
+    let mut sidebar: serde_json::Value =
+        serde_json::from_str(&chain.read("sidebar").unwrap()).unwrap();
+    let work = sidebar["spaces"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|s| s["id"] == "space-work")
+        .unwrap();
+    work["pinned"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|n| n["id"] != pinned.as_str());
+    chain.write("sidebar", &sidebar.to_string());
+    let synced = refresh(server, secret, dir).unwrap().unwrap();
+    let still = synced.spaces[1].pinned.iter().any(|r| match &r.item {
+        RowItem::Page { page } => page.id == pinned,
+        RowItem::Folder { .. } => false,
+    });
+    assert!(!still, "the pin the desktop took away stays away");
+}
+
+#[test]
 fn only_web_pages_can_be_pinned() {
     let dir = dir("web");
     refresh(server(1), demo::DEMO_SECRET.into(), dir.clone()).unwrap();
