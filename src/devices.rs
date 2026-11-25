@@ -141,13 +141,13 @@ pub fn exchange(
             .filter(|d| d.id != device.id)
             .flat_map(|d| d.applied.iter().cloned())
             .collect();
-        let applied: Vec<String> = edits::pending(dir)
+        let applied: Vec<String> = edits::pending(dir)?
             .into_iter()
             .map(|e| e.id)
             .filter(|id| done.contains(id))
             .collect();
         edits::applied(dir, &applied)?;
-        let edits: Vec<serde_json::Value> = edits::pending(dir)
+        let edits: Vec<serde_json::Value> = edits::pending(dir)?
             .iter()
             .filter_map(|e| serde_json::to_value(e).ok())
             .collect();

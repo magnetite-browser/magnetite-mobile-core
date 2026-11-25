@@ -12,7 +12,9 @@ desktop changed in between. What a phone writes is its own entry in a third
 collection, `devices`: the tabs open on it, which another device can take
 over, and its changes to the sidebar (pin a page, add a favorite, a new
 space, rename, remove), which a desktop makes and syncs. Until then the
-phone shows them on top of the sidebar it read, marked as waiting. The
+phone shows them on top of the sidebar it read, marked as waiting. A change
+a desktop took but could not make (say to a space deleted meanwhile) stops
+showing a week after the desktop took it. The
 format, the handover and the changes are described in `src/devices.rs` and
 `src/edits.rs`; the desktop reads that collection from
 [magnetite#163](https://github.com/magnetite-browser/magnetite/pull/163) on.

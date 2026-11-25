@@ -143,7 +143,7 @@ impl Demo {
             .and_then(|plain| serde_json::from_str(&plain).ok())
             .unwrap_or_else(|| serde_json::json!({ "devices": [] }));
         let devices = all["devices"].as_array_mut().expect("devices");
-        devices.retain(|d| d["id"] != "demo-desktop");
+        let mut me = desktop(devices);
         let taken: Vec<serde_json::Value> = devices
             .iter()
             .flat_map(|d| d["tabs"].as_array().cloned().unwrap_or_default())
@@ -152,11 +152,12 @@ impl Demo {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs());
-        devices.push(serde_json::json!({
-            "id": "demo-desktop", "name": "Demo desktop", "updated_at": now, "tabs": [], "taken": taken,
-        }));
+        let count = taken.len();
+        me["taken"] = taken.into();
+        me["updated_at"] = now.into();
+        devices.push(me);
         self.write("devices", &all.to_string());
-        taken.len()
+        count
     }
 
     /// Play a desktop that makes the changes to the sidebar the other
@@ -169,14 +170,10 @@ impl Demo {
             .and_then(|plain| serde_json::from_str(&plain).ok())
             .unwrap_or_else(|| serde_json::json!({ "devices": [] }));
         let devices = all["devices"].as_array_mut().expect("devices");
-        let before: Vec<serde_json::Value> = devices
-            .iter()
-            .find(|d| d["id"] == "demo-desktop")
-            .and_then(|d| d["applied"].as_array().cloned())
-            .unwrap_or_default();
+        let mut me = desktop(devices);
+        let before: Vec<serde_json::Value> = me["applied"].as_array().cloned().unwrap_or_default();
         let edits: Vec<Edit> = devices
             .iter()
-            .filter(|d| d["id"] != "demo-desktop")
             .flat_map(|d| d["edits"].as_array().cloned().unwrap_or_default())
             .filter_map(|e| serde_json::from_value(e).ok())
             .filter(|e: &Edit| !before.contains(&serde_json::Value::from(e.id.clone())))
@@ -197,10 +194,9 @@ impl Demo {
             .into_iter()
             .chain(edits.iter().map(|e| e.id.clone().into()))
             .collect();
-        devices.retain(|d| d["id"] != "demo-desktop");
-        devices.push(serde_json::json!({
-            "id": "demo-desktop", "name": "Demo desktop", "updated_at": now, "tabs": [], "applied": applied,
-        }));
+        me["applied"] = applied.into();
+        me["updated_at"] = now.into();
+        devices.push(me);
         self.write("devices", &all.to_string());
         edits.len()
     }
@@ -287,6 +283,15 @@ impl Demo {
             }
             _ => ("405 Method Not Allowed", String::new()),
         }
+    }
+}
+
+/// The demo desktop's entry, taken out of `devices` to be changed and put
+/// back, so what it took and what it made both stay.
+fn desktop(devices: &mut Vec<serde_json::Value>) -> serde_json::Value {
+    match devices.iter().position(|d| d["id"] == "demo-desktop") {
+        Some(i) => devices.remove(i),
+        None => serde_json::json!({ "id": "demo-desktop", "name": "Demo desktop", "tabs": [] }),
     }
 }
 

@@ -6,14 +6,17 @@
 //! sidebar meanwhile, marked as waiting. A desktop applies an edit to its own
 //! sidebar, which it then syncs, and puts the edit's id into its entry's
 //! `applied`. Once the phone sees that, it stops listing the edit, and drops
-//! it when the sidebar it reads shows the change, or after a week (a change
-//! the desktop could not make, say to a space deleted meanwhile).
+//! it when the sidebar it reads shows the change, with the earlier edits of
+//! the same item (the desktop made them in order, so the sidebar shows the
+//! last), or a week after the desktop said so: a change the desktop could
+//! not make (say to a space deleted meanwhile) then no longer shows.
 //!
 //! An edit that adds something carries the new item's id, so a second
 //! desktop applying it finds the item there and leaves it.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use magnetite_core::{FavoriteSet, SidebarNode, SidebarSnapshot, Space, TabItem};
 use serde::{Deserialize, Serialize};
@@ -23,6 +26,14 @@ use crate::chain::now_ms;
 
 /// An applied edit the sidebar does not show after this long is dropped.
 const SHOWN_FOR_SECONDS: i64 = 7 * 24 * 60 * 60;
+
+/// Edits are read, changed and written under this lock, so that two calls at
+/// once (the apps call from several threads) cannot lose one.
+static LOCK: Mutex<()> = Mutex::new(());
+
+fn lock() -> MutexGuard<'static, ()> {
+    LOCK.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// What a phone asks for. The desktop reads the same format
 /// (`crates/app/src/devices.rs` in magnetite).
@@ -57,6 +68,19 @@ pub enum Change {
     Remove { item: String },
 }
 
+impl Change {
+    /// The item the change is about.
+    pub fn item(&self) -> &str {
+        match self {
+            Change::Pin { item, .. }
+            | Change::Favorite { item, .. }
+            | Change::NewSpace { item, .. }
+            | Change::Rename { item, .. }
+            | Change::Remove { item } => item,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Edit {
     /// The edit's own id; `item` in the change names what it is about.
@@ -83,18 +107,24 @@ fn path(dir: &Path) -> PathBuf {
     dir.join("edits.json")
 }
 
-fn load(dir: &Path) -> Kept {
-    std::fs::read(path(dir))
-        .ok()
-        .and_then(|data| serde_json::from_slice(&data).ok())
-        .unwrap_or_default()
+/// The edits kept in `dir`; none without a file. A file that cannot be
+/// read is an error, never no edits: writing after that would lose them.
+fn load(dir: &Path) -> Result<Kept, SyncError> {
+    let unreadable = |e: &dyn std::fmt::Display| SyncError::Storage {
+        reason: format!("cannot read the changes kept on this device: {e}"),
+    };
+    match std::fs::read(path(dir)) {
+        Ok(data) => serde_json::from_slice(&data).map_err(|e| unreadable(&e)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Kept::default()),
+        Err(e) => Err(unreadable(&e)),
+    }
 }
 
 /// Written beside the file and moved over it, so a crash leaves the old one.
 fn save(dir: &Path, kept: &Kept) -> Result<(), SyncError> {
     let write = || -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
-        let part = dir.join("edits.json.part");
+        let part = dir.join(format!("edits.json.{}.part", new_id()));
         std::fs::write(&part, serde_json::to_vec(kept)?)?;
         std::fs::rename(part, path(dir))
     };
@@ -113,7 +143,8 @@ pub fn new_id() -> String {
 
 /// Keep `change` for the desktop.
 pub fn propose(dir: &Path, change: Change) -> Result<(), SyncError> {
-    let mut kept = load(dir);
+    let _lock = lock();
+    let mut kept = load(dir)?;
     kept.pending.push(Edit {
         id: new_id(),
         made_at: now_ms() / 1000,
@@ -123,8 +154,8 @@ pub fn propose(dir: &Path, change: Change) -> Result<(), SyncError> {
 }
 
 /// The edits no desktop has applied yet.
-pub fn pending(dir: &Path) -> Vec<Edit> {
-    load(dir).pending
+pub fn pending(dir: &Path) -> Result<Vec<Edit>, SyncError> {
+    Ok(load(dir)?.pending)
 }
 
 /// A desktop applied the edits `ids`: no longer listed, still shown.
@@ -132,7 +163,8 @@ pub fn applied(dir: &Path, ids: &[String]) -> Result<(), SyncError> {
     if ids.is_empty() {
         return Ok(());
     }
-    let mut kept = load(dir);
+    let _lock = lock();
+    let mut kept = load(dir)?;
     let now = now_ms() / 1000;
     let (done, waiting) = kept.pending.into_iter().partition(|e| ids.contains(&e.id));
     kept.pending = waiting;
@@ -141,26 +173,45 @@ pub fn applied(dir: &Path, ids: &[String]) -> Result<(), SyncError> {
     save(dir, &kept)
 }
 
-/// Drop the applied edits `snapshot` shows, and those applied long ago.
-pub fn settle(dir: &Path, snapshot: &SidebarSnapshot) {
-    let mut kept = load(dir);
+/// Drop the applied edits `snapshot` shows, with the earlier ones of the
+/// same item, and those applied long ago. True when it dropped any.
+pub fn settle(dir: &Path, snapshot: &SidebarSnapshot) -> bool {
+    let _lock = lock();
+    let Ok(mut kept) = load(dir) else {
+        return false;
+    };
     let now = now_ms() / 1000;
-    let before = kept.applied.len();
-    kept.applied
-        .retain(|(e, at)| now - at < SHOWN_FOR_SECONDS && !shows(snapshot, &e.change));
-    if kept.applied.len() != before {
-        save(dir, &kept).ok();
+    // Newest first: an edit the sidebar shows settles the earlier edits of
+    // its item, which it replaced (a rename after a rename, a removal
+    // after a pin).
+    let mut settled: HashSet<String> = HashSet::new();
+    let mut keep = vec![true; kept.applied.len()];
+    for (i, (edit, at)) in kept.applied.iter().enumerate().rev() {
+        let item = edit.change.item();
+        if settled.contains(item) || now - at >= SHOWN_FOR_SECONDS || shows(snapshot, &edit.change)
+        {
+            keep[i] = false;
+            settled.insert(item.to_string());
+        }
     }
+    if keep.iter().all(|&k| k) {
+        return false;
+    }
+    let mut keep = keep.into_iter();
+    kept.applied.retain(|_| keep.next().unwrap_or(true));
+    save(dir, &kept).is_ok()
 }
 
 pub fn forget(dir: &Path) {
+    let _lock = lock();
     std::fs::remove_file(path(dir)).ok();
 }
 
 /// Put this phone's edits on top of `snapshot`, as the desktop will. Returns
 /// the ids of the items they add or change, which wait for a desktop.
 pub fn overlay(dir: &Path, snapshot: &mut SidebarSnapshot) -> HashSet<String> {
-    let kept = load(dir);
+    // Only read; a file is replaced whole, never seen half written.
+    let kept = load(dir).unwrap_or_default();
     let edits = kept.applied.iter().map(|(e, _)| e).chain(&kept.pending);
     let mut waiting = HashSet::new();
     for edit in edits {
@@ -429,14 +480,14 @@ mod tests {
     fn an_edit_waits_listed_then_shown_until_the_sidebar_has_it() {
         let dir = dir("waits");
         propose(&dir, pin("n")).unwrap();
-        let edit = pending(&dir).remove(0);
+        let edit = pending(&dir).unwrap().remove(0);
 
         let mut shown = snapshot();
         assert_eq!(overlay(&dir, &mut shown), HashSet::from(["n".to_string()]));
 
         // A desktop applied it: no longer listed, still shown.
         applied(&dir, std::slice::from_ref(&edit.id)).unwrap();
-        assert!(pending(&dir).is_empty());
+        assert!(pending(&dir).unwrap().is_empty());
         let mut shown = snapshot();
         assert!(overlay(&dir, &mut shown).contains("n"));
 
@@ -449,7 +500,51 @@ mod tests {
             overlay(&dir, &mut shown).is_empty(),
             "the sidebar has it: nothing waits"
         );
+        assert!(settle(&dir, &synced));
+        assert!(load(&dir).unwrap().applied.is_empty());
+    }
+
+    /// Make `changes`, have a desktop apply them all, and return the
+    /// sidebar it syncs after.
+    fn made_by_a_desktop(dir: &Path, changes: &[Change]) -> SidebarSnapshot {
+        let mut synced = snapshot();
+        for change in changes {
+            propose(dir, change.clone()).unwrap();
+            apply(&mut synced, change);
+        }
+        let ids: Vec<String> = pending(dir).unwrap().into_iter().map(|e| e.id).collect();
+        applied(dir, &ids).unwrap();
+        synced
+    }
+
+    #[test]
+    fn the_last_edit_of_an_item_settles_the_earlier_ones() {
+        let rename = |title: &str| Change::Rename {
+            item: "t1".into(),
+            title: title.into(),
+        };
+        let dir = dir("renamed-twice");
+        let synced = made_by_a_desktop(&dir, &[rename("A"), rename("B")]);
         settle(&dir, &synced);
-        assert!(load(&dir).applied.is_empty());
+        let mut shown = synced.clone();
+        overlay(&dir, &mut shown);
+        assert_eq!(shown, synced, "not back to the first name");
+
+        let dir = self::dir("pinned-then-removed");
+        let synced = made_by_a_desktop(&dir, &[pin("n"), Change::Remove { item: "n".into() }]);
+        settle(&dir, &synced);
+        let mut shown = synced.clone();
+        overlay(&dir, &mut shown);
+        assert!(!find_tab(&shown, "n"), "the removed tab does not come back");
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_not_written_over() {
+        let dir = dir("unreadable");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(path(&dir), "{ not json").unwrap();
+        assert!(propose(&dir, pin("n")).is_err());
+        assert!(pending(&dir).is_err());
+        assert_eq!(std::fs::read_to_string(path(&dir)).unwrap(), "{ not json");
     }
 }

@@ -45,7 +45,9 @@ fn keep(dir: &Path, kept: &Kept) -> std::io::Result<()> {
 }
 
 pub fn cached(dir: &Path) -> Option<Sidebar> {
-    kept(dir).map(|k| shown(dir, k))
+    let kept = kept(dir)?;
+    edits::settle(dir, &kept.snapshot);
+    Some(shown(dir, kept))
 }
 
 /// `kept` with this phone's edits on top.
@@ -236,7 +238,10 @@ pub fn refresh(server: &str, secret: &str, dir: &Path) -> Result<Option<Sidebar>
         });
     }
     if remote.version == seen {
-        return Ok(None);
+        // The same sidebar; still, a week may have passed for an edit.
+        return Ok(kept(dir)
+            .filter(|k| edits::settle(dir, &k.snapshot))
+            .map(|k| shown(dir, k)));
     }
     let data = keys
         .open(&id, remote.version, &remote.sealed())
