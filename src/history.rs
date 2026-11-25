@@ -40,6 +40,10 @@ struct Kept {
     keep_days: u32,
     /// Oldest first.
     visits: Vec<Visit>,
+    /// The id the next visit gets. Ids only go up, also across a clear, so
+    /// that an id a list still holds never names another visit.
+    #[serde(default)]
+    next_id: i64,
 }
 
 impl Default for Kept {
@@ -47,6 +51,7 @@ impl Default for Kept {
         Self {
             keep_days: 90,
             visits: Vec::new(),
+            next_id: 1,
         }
     }
 }
@@ -72,15 +77,19 @@ impl History {
     #[uniffi::constructor]
     pub fn new(dir: String) -> Arc<Self> {
         let path = Path::new(&dir).join("history.json");
-        let kept = std::fs::read(&path)
+        let mut kept: Kept = std::fs::read(&path)
             .ok()
             .and_then(|data| serde_json::from_slice(&data).ok())
             .unwrap_or_default();
+        let highest = kept.visits.iter().map(|v| v.id).max().unwrap_or(0);
+        kept.next_id = kept.next_id.max(highest + 1);
+        // What grew too old while the app was closed goes now.
+        let changed = prune(&mut kept, now());
         Arc::new(Self {
             path,
             inner: Mutex::new(Inner {
                 kept,
-                changed: false,
+                changed,
                 written_at: now(),
             }),
         })
@@ -123,7 +132,9 @@ impl History {
     /// one), newest first, at most `limit`.
     pub fn visits(&self, query: String, limit: u32) -> Vec<Visit> {
         let query = query.trim().to_lowercase();
-        self.lock()
+        let mut inner = self.lock();
+        inner.prune();
+        inner
             .kept
             .visits
             .iter()
@@ -146,10 +157,11 @@ impl History {
         if query.is_empty() {
             return Vec::new();
         }
-        let inner = self.lock();
+        let mut inner = self.lock();
+        inner.prune();
         // Per address: its latest visit and how many there are.
         let mut pages: Vec<(&Visit, usize)> = Vec::new();
-        let mut index: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+        let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for visit in inner.kept.visits.iter().rev() {
             match index.get(&address(&visit.url)) {
                 Some(&i) => pages[i].1 += 1,
@@ -218,7 +230,7 @@ impl History {
         if !due(&inner) {
             return;
         }
-        prune(&mut inner.kept, now());
+        inner.prune();
         let Ok(data) = serde_json::to_vec(&inner.kept) else {
             return;
         };
@@ -228,24 +240,32 @@ impl History {
     }
 }
 
+impl Inner {
+    /// Drop what grew too old; what goes is written with the next write.
+    fn prune(&mut self) {
+        if prune(&mut self.kept, now()) {
+            self.changed = true;
+        }
+    }
+}
+
 /// Note a visit of `url` at `at`; false when nothing is kept.
 fn visit(kept: &mut Kept, url: String, title: String, at: i64) -> bool {
     if kept.keep_days == 0 || !(url.starts_with("https://") || url.starts_with("http://")) {
         return false;
     }
     let key = address(&url);
-    let recent = kept
-        .visits
-        .iter()
-        .rposition(|v| address(&v.url) == key && at - v.at < SAME_VISIT);
+    // Not across a clock set back: a visit "after" it is no reload.
+    let recent = (kept.visits.iter())
+        .rposition(|v| address(&v.url) == key && (0..SAME_VISIT).contains(&(at - v.at)));
     let (id, title) = match recent.map(|i| kept.visits.remove(i)) {
         // A title that is still to come stays the one there was.
         Some(before) if title.is_empty() => (before.id, before.title),
         Some(before) => (before.id, title),
-        None => (
-            kept.visits.iter().map(|v| v.id).max().unwrap_or(0) + 1,
-            title,
-        ),
+        None => {
+            kept.next_id += 1;
+            (kept.next_id - 1, title)
+        }
     };
     kept.visits.push(Visit { id, url, title, at });
     if kept.visits.len() > MOST {
@@ -254,16 +274,31 @@ fn visit(kept: &mut Kept, url: String, title: String, at: i64) -> bool {
     true
 }
 
-/// Drop visits older than the period kept.
-fn prune(kept: &mut Kept, now: i64) {
-    let oldest = now - i64::from(kept.keep_days) * DAY;
-    kept.visits.retain(|v| v.at > oldest);
+/// Drop visits older than the period kept; all of them with none kept.
+/// True when any went.
+fn prune(kept: &mut Kept, now: i64) -> bool {
+    let before = kept.visits.len();
+    if kept.keep_days == 0 {
+        kept.visits.clear();
+    } else {
+        let oldest = now - i64::from(kept.keep_days) * DAY;
+        kept.visits.retain(|v| v.at > oldest);
+    }
+    kept.visits.len() != before
 }
 
-/// The address as visits compare it: without `#place` or a trailing slash.
-fn address(url: &str) -> &str {
+/// The address as visits compare it: without `#place`, and without a
+/// trailing slash on its path (a query keeps its own).
+fn address(url: &str) -> String {
     let url = url.split_once('#').map_or(url, |(before, _)| before);
-    url.strip_suffix('/').unwrap_or(url)
+    let (path, query) = url
+        .split_once('?')
+        .map_or((url, None), |(p, q)| (p, Some(q)));
+    let path = path.strip_suffix('/').unwrap_or(path);
+    match query {
+        Some(query) => format!("{path}?{query}"),
+        None => path.to_string(),
+    }
 }
 
 /// How well `query` (lowercased) matches a page, as the apps rank: its site
@@ -375,6 +410,42 @@ mod tests {
     }
 
     #[test]
+    fn ids_are_never_given_twice_and_a_query_keeps_its_slash() {
+        let mut kept = Kept::default();
+        visit(&mut kept, "https://a.example/".into(), String::new(), 0);
+        visit(&mut kept, "https://b.example/".into(), String::new(), 1);
+        kept.visits.clear();
+        visit(&mut kept, "https://c.example/".into(), String::new(), 2);
+        assert_eq!(kept.visits[0].id, 3, "not an id a list may still hold");
+
+        visit(
+            &mut kept,
+            "https://s.example/?q=a/".into(),
+            String::new(),
+            3,
+        );
+        visit(&mut kept, "https://s.example/?q=a".into(), String::new(), 4);
+        assert_eq!(kept.visits.len(), 3, "two searches, two visits");
+        // A clock set back: no reload of the visit "after" it.
+        visit(&mut kept, "https://c.example".into(), String::new(), 1);
+        assert_eq!(kept.visits.len(), 4);
+    }
+
+    #[test]
+    fn with_history_off_no_visit_stays_even_one_from_the_future() {
+        let mut kept = Kept::default();
+        visit(
+            &mut kept,
+            "https://a.example/".into(),
+            String::new(),
+            100 * DAY,
+        );
+        kept.keep_days = 0;
+        assert!(prune(&mut kept, 0));
+        assert!(kept.visits.is_empty());
+    }
+
+    #[test]
     fn visits_older_than_the_period_go() {
         let mut kept = Kept {
             keep_days: 7,
@@ -404,30 +475,32 @@ mod tests {
         {
             let kept = &mut history.lock().kept;
             let hour = SAME_VISIT;
-            visit(kept, "https://wiki.example/a".into(), "Alps".into(), 0);
+            // Today's visits: older ones would go with the period.
+            let start = now() - 6 * hour;
+            visit(kept, "https://wiki.example/a".into(), "Alps".into(), start);
             visit(
                 kept,
                 "https://news.example/".into(),
                 "Wikinews".into(),
-                hour,
+                start + hour,
             );
             visit(
                 kept,
                 "https://www.wikipedia.org/".into(),
                 "Wikipedia".into(),
-                2 * hour,
+                start + 2 * hour,
             );
             visit(
                 kept,
                 "https://wiki.example/a".into(),
                 "Alps".into(),
-                3 * hour,
+                start + 3 * hour,
             );
             visit(
                 kept,
                 "https://other.example/wiki".into(),
                 "Other".into(),
-                5 * hour,
+                start + 5 * hour,
             );
         }
         let urls = |query: &str| -> Vec<String> {
