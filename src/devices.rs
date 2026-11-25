@@ -147,6 +147,9 @@ pub fn exchange(
             .filter(|id| done.contains(id))
             .collect();
         edits::applied(dir, &applied)?;
+        if !applied.is_empty() {
+            crate::chain::settle(dir);
+        }
         let edits: Vec<serde_json::Value> = edits::pending(dir)?
             .iter()
             .filter_map(|e| serde_json::to_value(e).ok())

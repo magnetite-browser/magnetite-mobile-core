@@ -44,6 +44,17 @@ fn keep(dir: &Path, kept: &Kept) -> std::io::Result<()> {
     std::fs::rename(part, kept_path(dir))
 }
 
+/// Settle this phone's edits against the sidebar kept in `dir`
+/// (`edits::settle`): run when a desktop says it made some, as the sidebar
+/// read just before may have them already. Otherwise a later sidebar, one
+/// the desktop changed again meanwhile, would be the first to settle them
+/// against, and an edit it no longer shows would come back for a week.
+pub fn settle(dir: &Path) {
+    if let Some(kept) = kept(dir) {
+        edits::settle(dir, &kept.snapshot);
+    }
+}
+
 pub fn cached(dir: &Path) -> Option<Sidebar> {
     let kept = kept(dir)?;
     edits::settle(dir, &kept.snapshot);
