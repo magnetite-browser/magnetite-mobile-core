@@ -3,9 +3,11 @@
 //! synced. The same record as the desktop's (`docs/spec/history.md` in
 //! magnetite), kept in the app's data folder as `history.json`.
 //!
-//! The app holds one `History` and calls it off the main thread. Visits are
-//! kept in memory and written at most once a minute, and by `save` (the app
-//! going to the background); removing and clearing are written at once.
+//! The app holds one `History` and calls it off the main thread, from any
+//! thread. Visits are kept in memory and written at most once a minute, and
+//! by `save` (the app going to the background); removing and clearing are
+//! written at once. A file that cannot be read is started over, as on the
+//! desktop.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -208,8 +210,9 @@ impl History {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// Drop what is too old, then write when `due`. The visits are
-    /// serialised under the lock, the file written outside it.
+    /// Drop what is too old, then write when `due`, under the lock: calls
+    /// from several threads never write an older state last, or into the
+    /// same file at once.
     fn write_if(&self, due: impl Fn(&Inner) -> bool) {
         let mut inner = self.lock();
         if !due(&inner) {
@@ -219,13 +222,9 @@ impl History {
         let Ok(data) = serde_json::to_vec(&inner.kept) else {
             return;
         };
-        inner.changed = false;
         inner.written_at = now();
-        drop(inner);
-        if write(&self.path, &data).is_err() {
-            // Tried again with the next change.
-            self.lock().changed = true;
-        }
+        // Tried again with the next change when it fails.
+        inner.changed = write(&self.path, &data).is_err();
     }
 }
 
