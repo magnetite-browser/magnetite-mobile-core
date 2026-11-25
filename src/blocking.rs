@@ -144,7 +144,9 @@ pub fn update_filter_lists(dir: String, ids: Vec<String>) -> ListsUpdate {
 /// `WKContentRuleListStore`; `None` without any. One set of rules for all
 /// lists, so that one list's exceptions (`@@`) apply to the others' rules,
 /// as they do on the desktop: WebKit applies an exception only within its
-/// own rule list.
+/// own rule list. As on the desktop, the page the user opens is never
+/// blocked, only what it loads: a rule without a type would otherwise
+/// blank a page whose address it matches.
 #[uniffi::export]
 pub fn webkit_content_rules(dir: String, ids: Vec<String>) -> Option<String> {
     let dir = lists_dir(Path::new(&dir));
@@ -162,9 +164,16 @@ pub fn webkit_content_rules(dir: String, ids: Vec<String>) -> Option<String> {
         any = true;
     }
     let (rules, _) = set.into_content_blocking().ok()?;
-    (any && !rules.is_empty())
-        .then(|| serde_json::to_string(&rules).ok())
-        .flatten()
+    if !any || rules.is_empty() {
+        return None;
+    }
+    let mut rules = serde_json::to_value(rules).ok()?;
+    // Last, so that it undoes every rule before it.
+    rules.as_array_mut()?.push(serde_json::json!({
+        "trigger": {"url-filter": ".*", "resource-type": ["document"], "load-context": ["top-frame"]},
+        "action": {"type": "ignore-previous-rules"}
+    }));
+    serde_json::to_string(&rules).ok()
 }
 
 fn lists_dir(dir: &Path) -> PathBuf {
@@ -320,9 +329,12 @@ mod tests {
         let actions: Vec<&str> = (rules.as_array().unwrap().iter())
             .map(|r| r["action"]["type"].as_str().unwrap())
             .collect();
-        // The exceptions after the rules they undo.
+        // The exceptions after the rules they undo, and last the one that
+        // lets the page itself load.
         assert_eq!(actions[..2], ["block", "block"]);
         assert!(actions[2..].iter().all(|a| *a == "ignore-previous-rules"));
+        let last = rules.as_array().unwrap().last().unwrap();
+        assert_eq!(last["trigger"]["load-context"][0], "top-frame");
         assert!(webkit_content_rules(dir_s.clone(), ids(&["easyprivacy"])).is_none());
 
         // A list no longer chosen goes.
