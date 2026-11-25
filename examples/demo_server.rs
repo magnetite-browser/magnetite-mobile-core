@@ -55,11 +55,21 @@ pub const SIDEBAR: &str = r#"{
      ],
      "today": [
        {"id": "today-1", "url": "https://example.com/", "title": "Example Domain"}
+     ],
+     "bookmarks": [
+       {"kind": "folder", "id": "bm-dir-1", "title": "Docs", "children": [
+         {"kind": "tab", "id": "bm-1", "url": "https://doc.rust-lang.org/book/", "title": "The Rust Programming Language"},
+         {"kind": "tab", "id": "bm-2", "url": "https://www.swift.org/documentation/", "title": "Swift Documentation"}
+       ]},
+       {"kind": "tab", "id": "bm-3", "url": "https://www.gutenberg.org/", "title": "Project Gutenberg"}
      ]},
     {"id": "space-work", "title": "Work", "icon": "briefcase", "accent": {"red": 0.2, "green": 0.5, "blue": 0.9},
      "profile_id": "9c2e7d14-2b7a-4c55-8e01-5d7f3a9b6c02",
      "pinned": [
        {"kind": "tab", "id": "pin-4", "url": "https://github.com/magnetite-browser/magnetite", "title": "magnetite", "home_url": "https://github.com/magnetite-browser/magnetite"}
+     ],
+     "bookmarks": [
+       {"kind": "tab", "id": "bm-4", "url": "https://docs.github.com/", "title": "GitHub Docs"}
      ]}
   ]
 }"#;
