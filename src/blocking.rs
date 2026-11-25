@@ -187,7 +187,9 @@ impl RequestBlocker {
     /// Whether to block a `method` request for `url` of type `kind`
     /// (adblock-rust's names: "script", "image", "stylesheet",
     /// "xmlhttprequest", "sub_frame", "other"…) that the page at `source`
-    /// makes.
+    /// makes. Never ask about the main frame's own request: the page the
+    /// user opens is not blocked, as on the desktop, and a `$document` rule
+    /// would block it.
     pub fn blocks(&self, url: String, source: String, kind: String, method: String) -> bool {
         adblock::request::Request::new(&url, &source, &kind, &method)
             .is_ok_and(|request| self.engine.check_network_request(&request).should_block())
