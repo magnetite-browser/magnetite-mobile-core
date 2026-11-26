@@ -3,31 +3,40 @@
 What the phone apps of [Magnetite](https://github.com/magnetite-browser/magnetite)
 ([iOS](https://github.com/magnetite-browser/magnetite-ios),
 [Android](https://github.com/magnetite-browser/magnetite-android)) share with
-the desktop browser, in Rust: joining a sync chain and reading the sidebar it
-holds. The apps call it through [UniFFI](https://mozilla.github.io/uniffi-rs/).
+the desktop browser, in Rust: joining a sync chain, reading the sidebar and
+the archive it holds, and changing them. The apps call it through
+[UniFFI](https://mozilla.github.io/uniffi-rs/).
 
-A phone never writes the chain's sidebar: the desktop replaces that
-collection as a whole, so a phone that wrote it would overwrite what a
-desktop changed in between. What a phone writes is its own entry in a third
-collection, `devices`: the tabs open on it, which another device can take
-over, and its changes to the sidebar (pin a page, add a favorite, a new
-space, rename, remove), which a desktop makes and syncs. Until then the
-phone shows them on top of the sidebar it read, marked as waiting. A change
-a desktop took but could not make (say to a space deleted meanwhile) stops
-showing a week after the desktop took it. The
-format, the handover and the changes are described in `src/devices.rs` and
-`src/edits.rs`; the desktop reads that collection from
-[magnetite#163](https://github.com/magnetite-browser/magnetite/pull/163) on.
+A phone's changes to the sidebar (pin a page, add a favorite, a new space,
+rename, remove) and to the archive (bring a closed tab back, remove one for
+good) are shown at once, marked as waiting, and written into the chain by
+the phone itself: it reads the newest sidebar and archive, makes its changes
+in them and writes them as the next versions. A removed pinned tab or
+favorite goes to the archive, where every device of the chain finds it.
+
+This needs desktops that merge a sidebar that arrives with their own
+changes ([magnetite#412](https://github.com/magnetite-browser/magnetite/pull/412));
+one from before takes the phone's sidebar in place of its own. The model
+keeps the fields this version does not know
+([magnetite#413](https://github.com/magnetite-browser/magnetite/pull/413)),
+so the phone writes back what a newer desktop put there, and it does not
+write over a sidebar or archive in a newer format.
+
+While a write does not go through, the changes stay listed in the phone's
+entry of a third collection, `devices`, next to the tabs open on it, which
+another device can take over: a desktop then makes the changes it knows, as
+before phones wrote the sidebar. The format, the handover and the changes
+are described in `src/devices.rs` and `src/edits.rs`.
 
 - `src/lib.rs`: the functions the apps call.
-- `src/chain.rs`: the requests. They repeat the reading half of the desktop's
-  sync client (`crates/app/src/sync.rs` in magnetite); the two should become
-  one crate.
+- `src/chain.rs`: the requests, and writing this phone's changes. They
+  repeat part of the desktop's sync client (`crates/app/src/sync.rs` in
+  magnetite); the two should become one crate.
 - `src/devices.rs`: this device's tabs in the chain, and which were taken over.
-- `src/edits.rs`: this phone's changes to the sidebar, kept until a desktop
-  made them.
+- `src/edits.rs`: this phone's changes to the sidebar and archive, kept
+  until they are written.
 - `src/view.rs`: the sidebar as a phone shows it, with each space's
-  bookmarks.
+  bookmarks, and the archive.
 - `src/history.rs`: the pages visited on the phone, as the desktop keeps
   them (address, title, time; never synced), with the address field's
   suggestions from them.

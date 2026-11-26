@@ -76,6 +76,41 @@ pub enum RowItem {
     },
 }
 
+/// A closed tab in the chain's archive.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct Archived {
+    /// The tab's id: what `restore` and `forget_archived` take.
+    pub id: String,
+    pub url: String,
+    pub title: String,
+    /// The name of the space it was closed in, if the sidebar has it.
+    pub space: Option<String>,
+    /// Unix seconds.
+    pub archived_at: i64,
+}
+
+/// `entries` as a phone shows them: newest first, web pages only.
+pub fn archive(
+    snapshot: &SidebarSnapshot,
+    entries: Vec<magnetite_core::archive::ArchivedTab>,
+) -> Vec<Archived> {
+    let mut entries = magnetite_core::archive::newest(entries, usize::MAX);
+    entries.reverse();
+    let web = |url: &str| url.starts_with("https://") || url.starts_with("http://");
+    (entries.into_iter())
+        .filter(|e| web(&e.tab.url))
+        .map(|e| Archived {
+            space: (snapshot.spaces.iter())
+                .find(|s| s.id == e.space_id)
+                .map(|s| s.title.clone()),
+            id: e.tab.id,
+            url: e.tab.url,
+            title: e.tab.title,
+            archived_at: e.archived_at,
+        })
+        .collect()
+}
+
 /// A page a phone can open: web addresses only. `home` picks where pinned
 /// tabs and favorites open: at their home address, not where the desktop
 /// last left them.
