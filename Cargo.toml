@@ -25,7 +25,7 @@ bindgen = ["uniffi/cli"]
 [dependencies]
 # The head of magnetite#414 (the sidebar merges, unknown fields are kept, the
 # archive syncs), until a release has it: then its tag.
-magnetite-core = { git = "https://github.com/magnetite-browser/magnetite", rev = "1f2432ef4337001fac4855157d19fcc039ceed64" }
+magnetite-core = { git = "https://github.com/magnetite-browser/magnetite", rev = "63ec43669497a786674d5369e1f53d8a14833570" }
 magnetite-sync-proto = { git = "https://github.com/magnetite-browser/magnetite-sync", tag = "v0.1.0" }
 uniffi = "0.32"
 ureq = "3"
