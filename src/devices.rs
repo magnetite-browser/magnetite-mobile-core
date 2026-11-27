@@ -1,6 +1,7 @@
 //! The chain's `devices` collection: per device the tabs open on it, the
-//! tabs of other devices it took over, and a phone's edits to the sidebar
-//! (`edits`) with the ids of those a desktop applied.
+//! tabs of other devices it took over, and those of a phone's edits to the
+//! sidebar (`edits`) it could not write itself, with the ids of those a
+//! desktop applied.
 //!
 //! Every device changes only its own entry and writes the collection as the
 //! version after the one it read; when another device wrote first, it reads
@@ -101,6 +102,9 @@ pub fn exchange(
     let id = keys.collection_id(DEVICES);
     let path = format!("/collections/{id}");
     let now = now_ms() / 1000;
+    // This phone's changes to the sidebar and archive, written by itself.
+    // What does not go through stays listed below, for a desktop to make.
+    crate::chain::write_changes(server, secret, dir).ok();
     for _ in 0..TRIES {
         let reply = request(server, &keys, "GET", &path, None)?;
         let (version, mut all) = match reply.status {

@@ -6,7 +6,7 @@ license = "EUPL-1.2"
 rust-version = "1.88"
 publish = false
 repository = "https://github.com/magnetite-browser/magnetite-mobile-core"
-description = "What Magnetite's phone apps share: joining a sync chain and reading its sidebar, history, content blocking"
+description = "What Magnetite's phone apps share: joining a sync chain, reading and changing its sidebar and archive, history, content blocking"
 
 [lib]
 name = "magnetite_mobile_core"
@@ -23,7 +23,9 @@ required-features = ["bindgen"]
 bindgen = ["uniffi/cli"]
 
 [dependencies]
-magnetite-core = { git = "https://github.com/magnetite-browser/magnetite", tag = "v0.0.5" }
+# The head of magnetite#414 (the sidebar merges, unknown fields are kept, the
+# archive syncs), until a release has it: then its tag.
+magnetite-core = { git = "https://github.com/magnetite-browser/magnetite", rev = "63ec43669497a786674d5369e1f53d8a14833570" }
 magnetite-sync-proto = { git = "https://github.com/magnetite-browser/magnetite-sync", tag = "v0.1.0" }
 uniffi = "0.32"
 ureq = "3"
@@ -33,6 +35,10 @@ thiserror = "2"
 getrandom = "0.4"
 # The desktop's filter engine; on iOS only its conversion to WebKit's content rules.
 adblock = { version = "0.13", default-features = false, features = ["content-blocking", "embedded-domain-resolver", "full-regex-handling"] }
+
+# A workspace of its own: the crate also builds in a checkout that lies inside
+# another workspace's folder (the desktop's).
+[workspace]
 
 [lints.clippy]
 all = { level = "warn", priority = -1 }

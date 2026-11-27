@@ -1,24 +1,32 @@
-//! Changes this phone asks a desktop to make to the chain's sidebar.
+//! This phone's changes to the chain's sidebar and archive.
 //!
-//! A phone never writes the sidebar (`lib.rs`). It keeps its edits in
-//! `edits.json` beside the sidebar it read, lists them in its entry of the
-//! `devices` collection (`devices::exchange`), and shows them on top of that
-//! sidebar meanwhile, marked as waiting. A desktop applies an edit to its own
-//! sidebar, which it then syncs, and puts the edit's id into its entry's
+//! A change is kept in `edits.json` beside the sidebar the phone read, and
+//! shown on top of that sidebar at once, marked as waiting. The phone then
+//! writes it to the chain itself (`chain::write_changes`): it reads the
+//! newest sidebar and archive, makes its waiting changes in them and writes
+//! them as the next versions. A change is made in what the chain holds at
+//! that moment, never in what the phone last saw, so nothing another device
+//! did in between is lost.
+//!
+//! While that write does not go through (the chain holds data this version
+//! cannot read, other devices keep writing first), the changes stay listed
+//! in the phone's entry of the `devices` collection (`devices::exchange`),
+//! as before phones wrote the sidebar: a desktop makes those it knows in
+//! its own sidebar, syncs it, and puts the edit's id into its entry's
 //! `applied`. Once the phone sees that, it stops listing the edit, and drops
 //! it when the sidebar it reads shows the change, with the earlier edits of
-//! the same item (the desktop made them in order, so the sidebar shows the
-//! last), or a week after the desktop said so: a change the desktop could
-//! not make (say to a space deleted meanwhile) then no longer shows.
+//! the same item, or a week after the desktop said so.
 //!
-//! An edit that adds something carries the new item's id, so a second
-//! desktop applying it finds the item there and leaves it.
+//! Every change can be made twice without harm: one that adds something
+//! carries the new item's id, so whoever makes it again finds the item
+//! there and leaves it.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
-use magnetite_core::{FavoriteSet, SidebarNode, SidebarSnapshot, Space, TabItem};
+use magnetite_core::archive::ArchivedTab;
+use magnetite_core::{FavoriteSet, Other, SidebarNode, SidebarSnapshot, Space, TabItem};
 use serde::{Deserialize, Serialize};
 
 use crate::SyncError;
@@ -63,9 +71,13 @@ pub enum Change {
     },
     /// A new name for a pinned tab, folder, favorite or space.
     Rename { item: String, title: String },
-    /// A pinned tab or a favorite goes; the desktop keeps a pinned tab in
-    /// its archive.
+    /// A pinned tab or a favorite goes, into the archive.
     Remove { item: String },
+    /// An archived tab comes back as a Today tab of its space. Desktops do
+    /// not make this one for a phone: it waits until the phone can write.
+    Restore { item: String },
+    /// An archived tab is removed from the archive for good. As `Restore`.
+    Forget { item: String },
 }
 
 impl Change {
@@ -76,7 +88,9 @@ impl Change {
             | Change::Favorite { item, .. }
             | Change::NewSpace { item, .. }
             | Change::Rename { item, .. }
-            | Change::Remove { item } => item,
+            | Change::Remove { item }
+            | Change::Restore { item }
+            | Change::Forget { item } => item,
         }
     }
 }
@@ -153,9 +167,18 @@ pub fn propose(dir: &Path, change: Change) -> Result<(), SyncError> {
     save(dir, &kept)
 }
 
-/// The edits no desktop has applied yet.
+/// The edits not made in the chain yet.
 pub fn pending(dir: &Path) -> Result<Vec<Edit>, SyncError> {
     Ok(load(dir)?.pending)
+}
+
+/// This phone wrote the edits `ids` into the chain itself: the sidebar and
+/// archive it keeps have them, and nothing of them is left to show.
+pub fn written(dir: &Path, ids: &[String]) -> Result<(), SyncError> {
+    let _lock = lock();
+    let mut kept = load(dir)?;
+    kept.pending.retain(|e| !ids.contains(&e.id));
+    save(dir, &kept)
 }
 
 /// A desktop applied the edits `ids`: no longer listed, still shown.
@@ -207,25 +230,89 @@ pub fn forget(dir: &Path) {
     std::fs::remove_file(path(dir)).ok();
 }
 
-/// Put this phone's edits on top of `snapshot`, as the desktop will. Returns
-/// the ids of the items they add or change, which wait for a desktop.
+/// Put this phone's edits on top of `snapshot`, as they will be made.
+/// Returns the ids of the items they add or change, which wait to be
+/// written.
 pub fn overlay(dir: &Path, snapshot: &mut SidebarSnapshot) -> HashSet<String> {
+    overlay_both(dir, snapshot, &mut Vec::new())
+}
+
+/// `overlay`, with the archive the edits take tabs from and put them into.
+pub fn overlay_both(
+    dir: &Path,
+    snapshot: &mut SidebarSnapshot,
+    archive: &mut Vec<ArchivedTab>,
+) -> HashSet<String> {
     // Only read; a file is replaced whole, never seen half written.
     let kept = load(dir).unwrap_or_default();
     let edits = kept.applied.iter().map(|(e, _)| e).chain(&kept.pending);
     let mut waiting = HashSet::new();
     for edit in edits {
-        if let Some(item) = apply(snapshot, &edit.change) {
+        if let Some(item) = apply_both(snapshot, archive, &edit.change, edit.made_at) {
             waiting.insert(item);
         }
     }
     waiting
 }
 
-/// Make `change` in `snapshot`, unless it is made already. Returns the item
-/// it added or renamed.
+/// Make `change` in `snapshot`, unless it is made already, without an
+/// archive: what it removes is gone. Returns the item it added or renamed.
 pub fn apply(snapshot: &mut SidebarSnapshot, change: &Change) -> Option<String> {
+    apply_both(snapshot, &mut Vec::new(), change, now_ms() / 1000)
+}
+
+/// The space a tab of profile `profile` is archived for when it had none (a
+/// favorite): the first space of that profile, else the first space.
+fn space_of_profile(spaces: &[Space], profile: &str) -> Option<String> {
+    let of_profile = spaces.iter().find(|s| s.profile_id == profile);
+    of_profile.or(spaces.first()).map(|s| s.id.clone())
+}
+
+/// What is left of a removed pinned tab or favorite: a Today tab at the page
+/// it was kept for.
+fn archived(mut tab: TabItem, space: String, at: i64) -> ArchivedTab {
+    if let Some(home) = tab.home_url.take() {
+        tab.url = home;
+    }
+    tab.keep_active = false;
+    tab.end_panel();
+    ArchivedTab {
+        tab,
+        space_id: space,
+        archived_at: at,
+        other: Other::new(),
+    }
+}
+
+/// Make `change`, of the time `at`, in `snapshot` and `archive`, unless it
+/// is made already. Returns the item it added or renamed.
+pub fn apply_both(
+    snapshot: &mut SidebarSnapshot,
+    archive: &mut Vec<ArchivedTab>,
+    change: &Change,
+    at: i64,
+) -> Option<String> {
     match change {
+        Change::Restore { item } => {
+            // The record archived last, should there be two.
+            let found = archive.iter().rposition(|e| &e.tab.id == item)?;
+            let record = archive.remove(found);
+            archive.retain(|e| &e.tab.id != item);
+            // In the sidebar again already (another device brought it back).
+            if snapshot.all_tabs().any(|t| &t.id == item) {
+                return None;
+            }
+            let mut tab = record.tab;
+            tab.home_url = None;
+            let here = snapshot.spaces.iter().position(|s| s.id == record.space_id);
+            let space = snapshot.spaces.get_mut(here.unwrap_or(0))?;
+            space.today.insert(0, tab);
+            Some(item.clone())
+        }
+        Change::Forget { item } => {
+            archive.retain(|e| &e.tab.id != item);
+            None
+        }
         Change::Pin {
             space,
             item: id,
@@ -264,6 +351,7 @@ pub fn apply(snapshot: &mut SidebarSnapshot, change: &Change) -> Option<String> 
                 None => snapshot.favorites.push(FavoriteSet {
                     profile_id: profile,
                     items: vec![tab],
+                    other: Other::new(),
                 }),
             }
             Some(id.clone())
@@ -276,9 +364,13 @@ pub fn apply(snapshot: &mut SidebarSnapshot, change: &Change) -> Option<String> 
             if snapshot.spaces.iter().any(|s| &s.id == id) {
                 return None;
             }
-            // As the desktop makes one: its star and violet, until then the
-            // first space's profile (the desktop gives it its default one).
-            let first = snapshot.spaces.first()?;
+            // As the desktop makes one: its star and violet, in the default
+            // profile (the first space's, should the sidebar name none).
+            let default = snapshot.profiles.iter().find(|p| p.is_default);
+            let profile = match default {
+                Some(p) => p.id.clone(),
+                None => snapshot.spaces.first()?.profile_id.clone(),
+            };
             snapshot.spaces.push(Space {
                 id: id.clone(),
                 title: title.clone(),
@@ -288,20 +380,30 @@ pub fn apply(snapshot: &mut SidebarSnapshot, change: &Change) -> Option<String> 
                     green: 0.5,
                     blue: 1.0,
                 }),
-                profile_id: first.profile_id.clone(),
-                pinned: Vec::new(),
-                today: Vec::new(),
-                bookmarks: Vec::new(),
+                profile_id: profile,
+                ..Space::default()
             });
             Some(id.clone())
         }
         Change::Rename { item, title } => rename(snapshot, item, title).then(|| item.clone()),
         Change::Remove { item } => {
+            let mut gone: Vec<(TabItem, Option<String>)> = Vec::new();
             for space in &mut snapshot.spaces {
-                remove_pinned(&mut space.pinned, item);
+                let removed = remove_pinned(&mut space.pinned, item);
+                gone.extend(removed.into_iter().map(|t| (t, Some(space.id.clone()))));
             }
             for set in &mut snapshot.favorites {
-                set.items.retain(|t| &t.id != item);
+                let (out, stay) = std::mem::take(&mut set.items)
+                    .into_iter()
+                    .partition(|t| &t.id == item);
+                set.items = stay;
+                let space = space_of_profile(&snapshot.spaces, &set.profile_id);
+                gone.extend(Vec::into_iter(out).map(|t| (t, space.clone())));
+            }
+            for (tab, space) in gone {
+                if let Some(space) = space {
+                    archive.push(archived(tab, space, at));
+                }
             }
             None
         }
@@ -318,6 +420,8 @@ fn shows(snapshot: &SidebarSnapshot, change: &Change) -> bool {
         // addition too. A rename of something gone meanwhile expires.
         Change::Rename { item, title } => title_of(snapshot, item) == Some(title.as_str()),
         Change::Remove { item } => !find_tab(snapshot, item),
+        // No desktop makes these two; nothing of them is ever left to show.
+        Change::Restore { .. } | Change::Forget { .. } => true,
     }
 }
 
@@ -406,14 +510,24 @@ fn rename(snapshot: &mut SidebarSnapshot, id: &str, title: &str) -> bool {
     })
 }
 
-/// Remove pinned tab `id` from the tree; folders stay.
-fn remove_pinned(nodes: &mut Vec<SidebarNode>, id: &str) {
-    nodes.retain(|n| !matches!(n, SidebarNode::Tab(t) if t.id == id));
-    for node in nodes {
-        if let SidebarNode::Folder(f) = node {
-            remove_pinned(&mut f.children, id);
+/// Take pinned tab `id` out of the tree; folders stay.
+fn remove_pinned(nodes: &mut Vec<SidebarNode>, id: &str) -> Vec<TabItem> {
+    let mut removed = Vec::new();
+    let (out, stay) = std::mem::take(nodes)
+        .into_iter()
+        .partition(|n| matches!(n, SidebarNode::Tab(t) if t.id == id));
+    *nodes = stay;
+    for node in Vec::into_iter(out) {
+        if let SidebarNode::Tab(t) = node {
+            removed.push(t);
         }
     }
+    for node in nodes {
+        if let SidebarNode::Folder(f) = node {
+            removed.extend(remove_pinned(&mut f.children, id));
+        }
+    }
+    removed
 }
 
 #[cfg(test)]

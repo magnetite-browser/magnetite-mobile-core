@@ -6,8 +6,8 @@ mod demo;
 use std::net::TcpListener;
 
 use magnetite_mobile_core::{
-    Device, DeviceTab, RowItem, SyncError, add_favorite, cached, exchange, join, new_space, pin,
-    refresh, rename,
+    Device, DeviceTab, RowItem, SyncError, add_favorite, cached, cached_archive, exchange,
+    forget_archived, join, new_space, pin, refresh, refresh_archive, remove, rename, restore,
 };
 use magnetite_sync_proto::SyncCode;
 
@@ -170,8 +170,24 @@ fn entries_of_devices_long_gone_are_dropped() {
     assert_eq!(held["devices"][0]["id"], "phone");
 }
 
+/// The chain's sidebar, as the server holds it.
+fn held_sidebar(chain: &demo::Demo) -> serde_json::Value {
+    serde_json::from_str(&chain.read("sidebar").unwrap()).unwrap()
+}
+
+/// The edits the phone lists in the chain's `devices`, for a desktop.
+fn listed_edits(chain: &demo::Demo) -> usize {
+    let Some(held) = chain.read("devices") else {
+        return 0;
+    };
+    let held: serde_json::Value = serde_json::from_str(&held).unwrap();
+    let devices = held["devices"].as_array().unwrap();
+    let mine = devices.iter().find(|d| d["id"] == "phone");
+    mine.and_then(|d| d["edits"].as_array()).map_or(0, Vec::len)
+}
+
 #[test]
-fn a_change_made_on_the_phone_waits_for_a_desktop_then_is_the_chains() {
+fn a_change_made_on_the_phone_is_written_into_the_chain_by_the_phone() {
     let (chain, server) = chain(1);
     let (secret, dir) = (demo::DEMO_SECRET.to_string(), dir("changes"));
     refresh(server.clone(), secret.clone(), dir.clone()).unwrap();
@@ -204,25 +220,37 @@ fn a_change_made_on_the_phone_waits_for_a_desktop_then_is_the_chains() {
     assert_eq!(shown.spaces[0].title, "House");
     assert!(shown.spaces[2].pending && shown.spaces[2].title == "Trip");
 
-    // The chain hears of them; a desktop makes them and says so.
+    // Meanwhile a desktop of a newer version wrote the sidebar: it opened
+    // a tab and gave a space something this version does not know.
+    let mut theirs = held_sidebar(&chain);
+    theirs["spaces"][0]["wallpaper"] = "hills".into();
+    theirs["spaces"][0]["today"].as_array_mut().unwrap().push(
+        serde_json::json!({"id": "theirs", "url": "https://example.net/", "title": "Theirs"}),
+    );
+    chain.write("sidebar", &theirs.to_string());
+
+    // The phone writes its changes into that sidebar, and asks no desktop.
     exchange(server.clone(), secret.clone(), phone(), vec![], dir.clone()).unwrap();
-    assert_eq!(chain.apply_all(), 4);
-    exchange(server.clone(), secret.clone(), phone(), vec![], dir.clone()).unwrap();
-    let held: serde_json::Value = serde_json::from_str(&chain.read("devices").unwrap()).unwrap();
-    let mine = held["devices"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|d| d["id"] == "phone");
-    assert!(
-        mine.is_some_and(|d| d.get("edits").is_none()),
-        "listed no more"
+    assert_eq!(listed_edits(&chain), 0);
+    let held = held_sidebar(&chain);
+    assert_eq!(held["spaces"][0]["title"], "House");
+    assert_eq!(
+        held["spaces"][0]["wallpaper"], "hills",
+        "kept, though unknown"
+    );
+    assert_eq!(held["spaces"][0]["today"][1]["id"], "theirs");
+    assert_eq!(held["spaces"][2]["title"], "Trip");
+    // A new space runs in the default profile.
+    assert_eq!(
+        held["spaces"][2]["profile_id"], held["profiles"][0]["id"],
+        "{}",
+        held["profiles"]
     );
 
-    // The new sidebar has them all, none waiting any more.
-    let synced = refresh(server, secret, dir.clone()).unwrap().unwrap();
+    // What the phone shows is the chain's, none waiting any more.
+    let synced = cached(dir.clone()).unwrap();
+    assert_eq!(synced.version, 3);
     assert_eq!(synced.spaces[0].title, "House");
-    assert_eq!(synced.spaces[2].title, "Trip");
     let RowItem::Page { page } = &synced.spaces[1].pinned.last().unwrap().item else {
         panic!("a pinned page")
     };
@@ -234,7 +262,92 @@ fn a_change_made_on_the_phone_waits_for_a_desktop_then_is_the_chains() {
             .iter()
             .any(|f| f.title == "Lib" && !f.pending)
     );
-    assert_eq!(cached(dir), Some(synced));
+    // Nothing newer on the server than what the phone wrote.
+    assert_eq!(refresh(server, secret, dir).unwrap(), None);
+}
+
+#[test]
+fn a_removed_pinned_tab_goes_to_the_archive_and_can_be_brought_back() {
+    let (chain, server) = chain(1);
+    let (secret, dir) = (demo::DEMO_SECRET.to_string(), dir("archive"));
+    refresh(server.clone(), secret.clone(), dir.clone()).unwrap();
+    assert!(
+        refresh_archive(server.clone(), secret.clone(), dir.clone())
+            .unwrap()
+            .is_empty()
+    );
+
+    // In the archive at once, before the chain has heard of it.
+    remove(dir.clone(), "pin-2".into()).unwrap();
+    let archived = cached_archive(dir.clone());
+    assert_eq!(archived.len(), 1);
+    assert_eq!(
+        (archived[0].id.as_str(), archived[0].space.as_deref()),
+        ("pin-2", Some("Home"))
+    );
+    exchange(server.clone(), secret.clone(), phone(), vec![], dir.clone()).unwrap();
+    let held: serde_json::Value = serde_json::from_str(&chain.read("archive").unwrap()).unwrap();
+    assert_eq!(held["entries"][0]["tab"]["id"], "pin-2");
+    assert_eq!(held["entries"][0]["space_id"], "space-home");
+    assert!(!chain.read("sidebar").unwrap().contains("pin-2"));
+
+    // Brought back: a Today tab of its space, and out of the archive.
+    let shown = restore(dir.clone(), "pin-2".into()).unwrap().unwrap();
+    assert_eq!(shown.spaces[0].today[0].id, "pin-2");
+    assert!(cached_archive(dir.clone()).is_empty());
+    exchange(server.clone(), secret.clone(), phone(), vec![], dir.clone()).unwrap();
+    assert_eq!(held_sidebar(&chain)["spaces"][0]["today"][0]["id"], "pin-2");
+    let held: serde_json::Value = serde_json::from_str(&chain.read("archive").unwrap()).unwrap();
+    assert_eq!(held["entries"].as_array().unwrap().len(), 0);
+
+    // A tab a desktop closed is in the phone's archive; removed there for
+    // good, it leaves the chain's.
+    chain.write(
+        "archive",
+        r#"{"version":1,"entries":[{"tab":{"id":"closed","url":"https://example.net/","title":"Closed","custom_title":false,"unread":false},"space_id":"space-work","archived_at":5}]}"#,
+    );
+    let archived = refresh_archive(server.clone(), secret.clone(), dir.clone()).unwrap();
+    assert_eq!(
+        (archived[0].id.as_str(), archived[0].space.as_deref()),
+        ("closed", Some("Work"))
+    );
+    assert!(
+        forget_archived(dir.clone(), "closed".into())
+            .unwrap()
+            .is_empty()
+    );
+    exchange(server, secret, phone(), vec![], dir).unwrap();
+    let held: serde_json::Value = serde_json::from_str(&chain.read("archive").unwrap()).unwrap();
+    assert_eq!(held["entries"].as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn while_the_phone_cannot_write_the_sidebar_a_desktop_is_asked() {
+    let (chain, server) = chain(1);
+    let (secret, dir) = (demo::DEMO_SECRET.to_string(), dir("fallback"));
+    refresh(server.clone(), secret.clone(), dir.clone()).unwrap();
+    // A newer version of Magnetite wrote the sidebar in a format this one
+    // must not write over.
+    let mut newer = held_sidebar(&chain);
+    newer["version"] = 2.into();
+    chain.write("sidebar", &newer.to_string());
+
+    pin(
+        dir.clone(),
+        "space-work".into(),
+        "https://docs.rs/".into(),
+        "Docs".into(),
+    )
+    .unwrap();
+    exchange(server.clone(), secret.clone(), phone(), vec![], dir.clone()).unwrap();
+    assert_eq!(held_sidebar(&chain), newer, "left as it is");
+    assert_eq!(listed_edits(&chain), 1, "for a desktop that can");
+    // Still shown on the phone, as waiting.
+    let shown = cached(dir).unwrap();
+    let RowItem::Page { page } = &shown.spaces[1].pinned.last().unwrap().item else {
+        panic!("a pinned page")
+    };
+    assert!(page.pending);
 }
 
 #[test]
